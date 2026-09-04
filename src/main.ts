@@ -13,7 +13,7 @@ import { Notice, Plugin } from 'obsidian';
 import { ObsidianHttpTransport, type RedeemOutcome } from './api-client';
 import { UctNotebookSyncSettingTab } from './settings';
 import { SyncManager, type SyncSummary } from './sync-manager';
-import { defaultPluginData, type PluginData } from './types';
+import { defaultPluginData, type PluginData, clearStagedState} from './types';
 import { ObsidianVaultSource } from './vault-source';
 
 export default class UctNotebookSyncPlugin extends Plugin {
@@ -68,6 +68,14 @@ export default class UctNotebookSyncPlugin extends Plugin {
 			label,
 		});
 		if (result.ok) {
+			// ⛔ The server purges this vault's staging AND manifest on
+			// disconnect, so a redeemed code always means an EMPTY staging
+			// area. Carrying the old per-file state over makes the next sync
+			// push nothing while still manifesting every path, which the
+			// server refuses outright — a vault that silently stops syncing
+			// and never recovers. Start from a clean slate so the next sync
+			// is a full re-push.
+			this.data = clearStagedState(this.data);
 			this.data.deviceToken = result.token;
 			this.data.connectedLabel = label;
 			this.data.connectedAt = new Date().toISOString();

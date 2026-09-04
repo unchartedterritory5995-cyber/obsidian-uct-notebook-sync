@@ -113,6 +113,29 @@ export interface PluginData {
 	files: Record<string, FileState>;
 }
 
+/**
+ * Forget everything this vault believes it has already staged.
+ *
+ * ⛔⛔ MUST be called whenever a connect code is redeemed. Disconnecting on the
+ * server purges BOTH `j2_obsidian_staging` and `j2_obsidian_manifest` for the
+ * user, so a reconnected vault faces an EMPTY staging area. If the plugin keeps
+ * its old per-file state it concludes nothing changed, pushes nothing, and yet
+ * still manifests every path — and the server refuses that manifest outright
+ * ("manifest lists N path(s) never pushed to staging for this vault"), because
+ * naming an unstaged path is exactly how a padded manifest could otherwise mass
+ * -tag a member's notes as deleted.
+ *
+ * The member-visible symptom is a vault that silently stops syncing after a
+ * disconnect/reconnect and never recovers, because no file's hash changes.
+ * Found by the real-vault gate on 2026-09-04, not by any unit test.
+ *
+ * `vaultId` is deliberately preserved — a reconnect must reuse it so the
+ * server rotates the existing device row rather than orphaning it.
+ */
+export function clearStagedState(data: PluginData): PluginData {
+	return { ...data, files: {}, lastSyncAt: null, lastSyncError: null };
+}
+
 export const DEFAULT_SERVER_URL = 'https://uctintelligence.com';
 
 export function defaultPluginData(vaultId: string): PluginData {

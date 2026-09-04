@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { applySyncResult, finalizeManifest, planSync } from '../sync-plan';
-import type { FileState, ScannedFile } from '../types';
+import { clearStagedState, defaultPluginData } from '../types';
+import type { FileState, PluginData, ScannedFile } from '../types';
 
 function scanned(path: string, hash: string, body = '# ' + path): ScannedFile {
 	return { path, hash, updatedAt: '2026-09-02T00:00:00.000Z', body };
@@ -171,5 +172,55 @@ describe('applySyncResult', () => {
 		};
 		const next = applySyncResult(prior, [scanned('a.md', 'h1')], new Set(), new Set(), 'now');
 		expect(Object.keys(next)).toEqual(['a.md']);
+	});
+});
+
+// ── Reconnect must forget what the server already forgot ─────────────────────
+// Found by the real-vault E2E on 2026-09-04, not by any unit test.
+//
+// Disconnecting purges BOTH j2_obsidian_staging and j2_obsidian_manifest
+// server-side. If the plugin keeps its per-file state across a reconnect it
+// sees no hash changes, pushes NOTHING, and still manifests every path — which
+// the server refuses ("manifest lists N path(s) never pushed to staging").
+// The member's vault then silently stops syncing forever, because no file's
+// content changes to break the deadlock.
+describe('clearStagedState — the reconnect contract', () => {
+	const connected: PluginData = {
+		...defaultPluginData('vault-uuid-1'),
+		deviceToken: 'old-token',
+		connectedLabel: 'my vault',
+		lastSyncAt: '2026-09-04T00:00:00.000Z',
+		lastSyncError: 'something stale',
+		files: {
+			'A.md': { hash: 'h1', syncedAt: '2026-09-04T00:00:00.000Z', tooLarge: false },
+			'B.md': { hash: 'h2', syncedAt: '2026-09-04T00:00:00.000Z', tooLarge: false },
+		},
+	};
+
+	it('forgets every staged path so the next sync is a full re-push', () => {
+		const fresh = clearStagedState(connected);
+		expect(Object.keys(fresh.files)).toEqual([]);
+		// The whole point: planning against the cleared state must push
+		// everything again, not conclude "nothing changed".
+		const scanned: ScannedFile[] = [
+			{ path: 'A.md', hash: 'h1', body: 'a', mtime: '2026-09-04T00:00:00.000Z' },
+			{ path: 'B.md', hash: 'h2', body: 'b', mtime: '2026-09-04T00:00:00.000Z' },
+		];
+		const plan = planSync(scanned, fresh.files);
+		expect(plan.toPush.map((n) => n.vault_path).sort()).toEqual(['A.md', 'B.md']);
+		// And no path may be manifested that this run is not actually pushing.
+		expect(plan.manifestPaths.sort()).toEqual(['A.md', 'B.md']);
+	});
+
+	it('keeps the vaultId, because a reconnect must rotate the same device row', () => {
+		const fresh = clearStagedState(connected);
+		expect(fresh.vaultId).toBe('vault-uuid-1');
+		expect(fresh.serverUrl).toBe(connected.serverUrl);
+	});
+
+	it('clears the stale sync status rather than showing the pre-disconnect one', () => {
+		const fresh = clearStagedState(connected);
+		expect(fresh.lastSyncAt).toBeNull();
+		expect(fresh.lastSyncError).toBeNull();
 	});
 });
