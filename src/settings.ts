@@ -122,14 +122,38 @@ export class UctNotebookSyncSettingTab extends PluginSettingTab {
 					}
 					btn.setDisabled(true).setButtonText('Connecting…');
 					const result = await this.plugin.redeemConnectCode(this.connectCode);
-					btn.setDisabled(false).setButtonText('Connect');
-					if (result.ok) {
-						this.connectCode = '';
-						new Notice(`Connected. Vault "${this.plugin.app.vault.getName()}" is now syncing to UCT Notebook.`);
-						this.display();
-					} else {
+					if (!result.ok) {
+						btn.setDisabled(false).setButtonText('Connect');
 						new Notice(`Could not connect: ${result.message}`);
+						return;
 					}
+					this.connectCode = '';
+					// ⛔ Connecting a vault MEANS "bring this vault into UCT".
+					// This notice previously said the vault "is now syncing"
+					// while nothing had been started — the member had to find
+					// "Sync now" themselves, so the copy promised a run that
+					// was not happening. Do the first sync here so the
+					// sentence is true, and report what actually landed.
+					btn.setButtonText('Importing…');
+					const summary = await this.plugin.runManualSync();
+					btn.setDisabled(false).setButtonText('Connect');
+					const vault = this.plugin.app.vault.getName();
+					if (summary.ok) {
+						const skipped = summary.tooLarge.length;
+						new Notice(
+							`Connected. ${summary.pushed} note${summary.pushed === 1 ? '' : 's'} ` +
+							`from "${vault}" sent to UCT Notebook` +
+							(skipped ? ` — ${skipped} too large to send (listed below).` : '.'),
+						);
+					} else {
+						// Connected, but the first import did not complete. Say
+						// exactly that rather than claiming the vault is synced.
+						new Notice(
+							`Connected, but the first import did not finish: ${summary.error ?? 'unknown error'}. ` +
+							'Use "Sync now" to retry.',
+						);
+					}
+					this.display();
 				}),
 		);
 	}
