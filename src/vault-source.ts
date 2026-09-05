@@ -5,7 +5,8 @@
  * every decision this plugin makes by injecting a fake `VaultSource`
  * instead.
  */
-import type { App, TFile } from 'obsidian';
+import { TFile } from 'obsidian';
+import type { App } from 'obsidian';
 import type { VaultFileRef, VaultSource } from './sync-manager';
 
 export class ObsidianVaultSource implements VaultSource {
@@ -20,9 +21,13 @@ export class ObsidianVaultSource implements VaultSource {
 
 	async readFile(path: string): Promise<string> {
 		const file = this.app.vault.getAbstractFileByPath(path);
-		if (!file || !('extension' in file)) {
+		// `instanceof TFile` rather than `as TFile` behind an `'extension' in
+		// file` duck-check: a folder that happened to carry an `extension`
+		// property would have satisfied the old guard and been handed to
+		// `cachedRead` as if it were a file.
+		if (!(file instanceof TFile)) {
 			throw new Error(`File not found or not readable: ${path}`);
 		}
-		return this.app.vault.cachedRead(file as TFile);
+		return this.app.vault.cachedRead(file);
 	}
 }

@@ -40,8 +40,14 @@ export const DEFAULT_BATCH_OPTIONS: BatchOptions = {
 // `body_md`.
 const OVERHEAD_PER_NOTE_BYTES = 512;
 
+// `TextEncoder` (a typed DOM global, already in tsconfig's `lib`) rather than
+// Node's `Buffer.byteLength` — identical UTF-8 byte count, one less Node
+// builtin reached through a bare specifier that types as `any` under a
+// type-aware lint that resolves modules differently than this repo's tsc.
+const UTF8 = new TextEncoder();
+
 function utf8ByteLength(s: string): number {
-	return Buffer.byteLength(s, 'utf8');
+	return UTF8.encode(s).length;
 }
 
 /** Pure, deterministic, order-preserving. Returns `[]` for an empty input. */

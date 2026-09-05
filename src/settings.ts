@@ -21,7 +21,11 @@ export class UctNotebookSyncSettingTab extends PluginSettingTab {
 		containerEl.empty();
 		const data = this.plugin.data;
 
-		containerEl.createEl('h2', { text: 'UCT Notebook Sync' });
+		// ⛔ Headings go through `Setting(...).setHeading()`, never a raw
+		// `createEl('h2'|'h3')` — Obsidian's directory review rejects
+		// hand-rolled heading elements because they miss the app's own
+		// heading styling and break visual consistency across settings tabs.
+		new Setting(containerEl).setName('UCT Notebook Sync').setHeading();
 		containerEl.createEl('p', {
 			text:
 				'One-way sync: this vault’s markdown notes are pushed into your ' +
@@ -137,7 +141,9 @@ export class UctNotebookSyncSettingTab extends PluginSettingTab {
 			.sort();
 		if (tooLarge.length === 0) return;
 
-		containerEl.createEl('h3', { text: `Notes that could not sync (${tooLarge.length})` });
+		new Setting(containerEl)
+			.setName(`Notes that could not sync (${tooLarge.length})`)
+			.setHeading();
 		containerEl.createEl('p', {
 			text:
 				'These notes are too large to store once converted, so they are skipped rather than ' +

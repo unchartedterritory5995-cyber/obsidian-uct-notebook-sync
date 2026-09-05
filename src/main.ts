@@ -7,8 +7,6 @@
  * See README.md for the wire contract this plugin implements and the
  * server-side repo it talks to.
  */
-// Bare "crypto" — see hashing.ts's comment on why not "node:crypto".
-import { randomUUID } from 'crypto';
 import { Notice, Plugin } from 'obsidian';
 import { ObsidianHttpTransport, type RedeemOutcome } from './api-client';
 import { UctNotebookSyncSettingTab } from './settings';
@@ -39,7 +37,11 @@ export default class UctNotebookSyncPlugin extends Plugin {
 		});
 
 		this.addCommand({
-			id: 'uct-notebook-sync-now',
+			// ⛔ NOT 'uct-notebook-sync-now': Obsidian already namespaces a
+			// command as `<plugin-id>:<id>`, so repeating the plugin id here
+			// ships the member a command called
+			// "uct-notebook-sync:uct-notebook-sync-now".
+			id: 'sync-now',
 			name: 'Sync vault to UCT Notebook',
 			callback: () => {
 				void this.runManualSync();
@@ -55,7 +57,7 @@ export default class UctNotebookSyncPlugin extends Plugin {
 		// second, orphaned one. Only ever generated ONCE, on a genuinely
 		// fresh install (no stored data at all, or a pre-existing blob
 		// missing it for some reason).
-		const vaultId = stored?.vaultId ?? randomUUID();
+		const vaultId = stored?.vaultId ?? crypto.randomUUID();
 		this.data = { ...defaultPluginData(vaultId), ...stored, vaultId };
 	}
 
