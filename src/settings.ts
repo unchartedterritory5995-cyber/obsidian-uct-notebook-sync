@@ -21,11 +21,12 @@ export class UctNotebookSyncSettingTab extends PluginSettingTab {
 		containerEl.empty();
 		const data = this.plugin.data;
 
-		// ⛔ Headings go through `Setting(...).setHeading()`, never a raw
-		// `createEl('h2'|'h3')` — Obsidian's directory review rejects
-		// hand-rolled heading elements because they miss the app's own
-		// heading styling and break visual consistency across settings tabs.
-		new Setting(containerEl).setName('UCT Notebook Sync').setHeading();
+		// ⛔ NO leading heading here. Two review rules meet at this line: a
+		// heading must be built with `Setting(...).setHeading()` rather than a
+		// raw `createEl('h2')`, AND a settings heading must not repeat the
+		// plugin name — which is the only thing a heading in this position
+		// could say, since Obsidian already titles the tab "UCT Notebook Sync".
+		// The description below carries the information; the heading carried none.
 		containerEl.createEl('p', {
 			text:
 				'One-way sync: this vault’s markdown notes are pushed into your ' +

@@ -1,6 +1,6 @@
 {
 	"name": "uct-notebook-sync",
-	"version": "0.1.2",
+	"version": "0.1.3",
 	"description": "Obsidian plugin: one-way sync of vault markdown into UCT Intelligence Notebook.",
 	"main": "main.js",
 	"type": "module",
