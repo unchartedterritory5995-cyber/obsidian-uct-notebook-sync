@@ -90,6 +90,12 @@ export class UctNotebookSyncSettingTab extends PluginSettingTab {
 		this.renderAttachmentIssues(containerEl);
 	}
 
+	/** Re-render after a sync finishes, but only while the tab is on screen, so the
+	 * issues list never shows the previous run's results (review M5). */
+	refreshIfOpen(): void {
+		if (this.containerEl.isShown()) this.display();
+	}
+
 	private renderAttachmentIssues(containerEl: HTMLElement): void {
 		const issues = this.plugin.data.attachmentIssues;
 		if (issues.length === 0) return;

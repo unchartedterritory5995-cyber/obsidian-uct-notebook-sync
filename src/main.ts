@@ -19,6 +19,7 @@ export default class UctNotebookSyncPlugin extends Plugin {
 	data!: PluginData;
 	private transport = new ObsidianHttpTransport();
 	private syncManager!: SyncManager;
+	private settingTab!: UctNotebookSyncSettingTab;
 	private syncing = false;
 
 	async onload(): Promise<void> {
@@ -31,7 +32,8 @@ export default class UctNotebookSyncPlugin extends Plugin {
 			saveData: (data) => this.saveData(data),
 		});
 
-		this.addSettingTab(new UctNotebookSyncSettingTab(this.app, this));
+		this.settingTab = new UctNotebookSyncSettingTab(this.app, this);
+		this.addSettingTab(this.settingTab);
 
 		this.addRibbonIcon('refresh-cw', 'Sync to UCT Notebook', () => {
 			void this.runManualSync();
@@ -118,6 +120,7 @@ export default class UctNotebookSyncPlugin extends Plugin {
 				this.data.attachmentsNoticeShown = true;
 				await this.saveData(this.data);
 			}
+			this.settingTab.refreshIfOpen();
 			return summary;
 		} finally {
 			this.syncing = false;

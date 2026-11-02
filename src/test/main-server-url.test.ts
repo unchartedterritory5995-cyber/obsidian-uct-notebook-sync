@@ -3,7 +3,7 @@
  * the wiring between the Server URL guard and the network is where a
  * "tested green but unreachable" bug would live.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { IngestParams, RedeemParams, Transport } from '../api-client';
 import UctNotebookSyncPlugin from '../main';
 import { notices, TFile } from './obsidian-stub';
@@ -122,6 +122,20 @@ describe('plugin wiring of the Server URL guard', () => {
 		// and the lock is released afterwards
 		const third = await plugin.runManualSync();
 		expect(third.error).not.toBe('A sync is already running.');
+	});
+
+	it('a finished sync re-renders the settings tab while it is open, and only then (M5)', async () => {
+		const { plugin } = await makePlugin('https://uctintelligence.com');
+		const tab = (plugin as any).settingTab;
+		expect(tab).toBeDefined();
+		const display = vi.spyOn(tab, 'display').mockImplementation(() => {});
+		let shown = true;
+		tab.containerEl = { isShown: () => shown };
+		await plugin.runManualSync();
+		expect(display).toHaveBeenCalledTimes(1);
+		shown = false;
+		await plugin.runManualSync();
+		expect(display).toHaveBeenCalledTimes(1);
 	});
 
 	it('the lock is released after an invalid-URL refusal', async () => {

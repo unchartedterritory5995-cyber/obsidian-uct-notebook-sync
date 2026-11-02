@@ -62,7 +62,7 @@ export class Plugin {
 }
 
 export class PluginSettingTab {
-	containerEl: any = {};
+	containerEl: any = { isShown: () => false };
 	constructor(public app: unknown, public plugin: unknown) {}
 }
 
