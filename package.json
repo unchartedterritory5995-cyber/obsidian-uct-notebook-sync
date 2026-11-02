@@ -13,11 +13,14 @@
 	"keywords": [],
 	"author": "UCT Intelligence",
 	"license": "MIT",
+	"engines": {
+		"node": "24.x"
+	},
 	"devDependencies": {
-		"@types/node": "^22.15.17",
+		"@types/node": "22.20.1",
 		"esbuild": "0.25.5",
-		"obsidian": "latest",
-		"typescript": "^5.8.3",
-		"vitest": "^2.1.9"
+		"obsidian": "1.13.1",
+		"typescript": "5.9.3",
+		"vitest": "2.1.9"
 	}
 }
