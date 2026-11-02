@@ -64,6 +64,9 @@ export interface VaultSource {
 	listRawRefs(notePath: string): RawLinkRef[];
 	/** The vault file a link names, by Obsidian's own resolver, or null. */
 	resolveLink(linkpath: string, sourcePath: string): ResolvedFile | null;
+	/** `resolveLink(raw.linkpath)`, then, for a markdown-form ref only, one retry with
+	 * the destination cut at `?`/`#` and decoded once. What Task 10 calls per ref. */
+	resolveRef(raw: RawLinkRef, sourcePath: string): ResolvedFile | null;
 	readBinary(path: string): Promise<ArrayBuffer>;
 }
 

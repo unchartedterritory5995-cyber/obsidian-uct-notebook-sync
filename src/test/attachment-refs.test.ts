@@ -77,6 +77,18 @@ describe('classifyRef', () => {
 		expect(classifyRef(raw('![[100%25.png]]', '100%25.png'), null)).toMatchObject({ ref: { path: '100%25.png' } });
 	});
 
+	it('a markdown destination is read from the original and decoded exactly once (N2)', () => {
+		// a file literally named `100%25.pdf`, written encoded as `100%2525.pdf`
+		const want = { kind: 'missing', ref: { path: '100%25.pdf' } };
+		// Obsidian's link already decoded
+		expect(classifyRef(raw('[x](100%2525.pdf)', '100%25.pdf', false), null)).toMatchObject(want);
+		// Obsidian's link still encoded
+		expect(classifyRef(raw('[x](100%2525.pdf)', '100%2525.pdf', false), null)).toMatchObject(want);
+		// angle-bracket destination with a title; alt text holding brackets and code
+		expect(classifyRef(raw('![a [b] `c`](<att/my file.png> "t")', 'att/my file.png'), null))
+			.toMatchObject({ kind: 'missing', ref: { path: 'att/my file.png' } });
+	});
+
 	it('an unresolved markdown link parses with markdown-link rules (M4)', () => {
 		const md = (original: string, linkpath: string) => classifyRef(raw(original, linkpath), null);
 		expect(md('![](x.png?raw=1)', 'x.png?raw=1')).toMatchObject({ kind: 'missing', ref: { path: 'x.png' } });

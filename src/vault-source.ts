@@ -10,7 +10,7 @@
 import { parseLinktext, TFile } from 'obsidian';
 import type { App, CachedMetadata } from 'obsidian';
 import type { VaultFileRef, VaultSource } from './sync-manager';
-import type { RawLinkRef, ResolvedFile } from './attachment-refs';
+import { markdownTarget, type RawLinkRef, type ResolvedFile } from './attachment-refs';
 
 function toResolved(file: TFile): ResolvedFile {
 	return { path: file.path, extension: file.extension, size: file.stat.size, mtime: file.stat.mtime };
@@ -117,6 +117,18 @@ export class ObsidianVaultSource implements VaultSource {
 				// a malformed escape: the link stays unresolved
 			}
 		}
+		return dest instanceof TFile ? toResolved(dest) : null;
+	}
+
+	resolveRef(raw: RawLinkRef, sourcePath: string): ResolvedFile | null {
+		const hit = this.resolveLink(raw.linkpath, sourcePath);
+		if (hit !== null) return hit;
+		// A markdown destination as the server reads it (`x.png?raw=1` names `x.png`),
+		// asked of Obsidian AS IS: it is already decoded once, so it never goes back
+		// through resolveLink's `%` retry (review N1, N2).
+		const target = markdownTarget(raw);
+		if (!target || target === raw.linkpath.trim()) return null;
+		const dest = this.app.metadataCache.getFirstLinkpathDest(target, sourcePath);
 		return dest instanceof TFile ? toResolved(dest) : null;
 	}
 

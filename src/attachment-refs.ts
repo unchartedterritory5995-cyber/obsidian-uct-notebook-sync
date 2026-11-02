@@ -79,27 +79,39 @@ function unresolvedWikiName(linkpath: string): string {
 	return parseLinktext(linkpath).path.trim();
 }
 
+/** `[[...]]` / `![[...]]` is a wikilink; anything else Obsidian caches is markdown form. */
+function isWikiOriginal(original: string): boolean {
+	return original.startsWith('[[') || original.startsWith('![[');
+}
+
+/** A whole markdown link or image, as the server's `_MD_LINK_OR_IMAGE_RE` in
+ * `providers/obsidian.py` reads one; group 3 is the destination (`<...>` or bare). */
+const MD_LINK_RE =
+	/^!?\[(?:[^[\]\n]|\[[^[\]\n]*\])*\]\(\s*(<[^<>\n]*>|[^\s()<>]+)(?:\s+(?:"[^"\n]*"|'[^'\n]*'))?\s*\)$/;
+
 /**
- * The name an UNRESOLVED markdown link (`[x](dest)`, `![](dest)`) stands for, read as
- * the server's no-list branch (`providers/obsidian.py::_mark_unsent_attachments.markdown`)
- * reads a destination: cut at the first `?` or `#`, then percent-decoded ONCE (a
- * malformed escape keeps the raw text). Backslashes become `/`, so a Windows-written
- * `att\x.png` names `att/x.png`. ⛔ Never applied to a wikilink: `[[100%25.png]]` names
- * a file literally called `100%25.png` (review I1, M4).
+ * The file a MARKDOWN-form link (`[x](dest)`, `![](dest)`) names, read as the server's
+ * no-list branch (`providers/obsidian.py::_mark_unsent_attachments.markdown`) reads a
+ * destination: cut at the first `?` or `#`, then percent-decoded ONCE (a malformed
+ * escape keeps the raw text). Backslashes become `/`, so a Windows-written `att\x.png`
+ * names `att/x.png`. The destination comes from the `original` text, never from
+ * Obsidian's `link`, which may already be decoded: decoding that again would turn a
+ * name holding `%25` into a different name (review N2). Falls back to `link` only
+ * when the original does not parse. `null` for a wikilink: `[[100%25.png]]` names a
+ * file literally called `100%25.png` and is never decoded (review I1, M4).
  */
-function unresolvedMarkdownName(linkpath: string): string {
-	let name = linkpath.trim().split(/[?#]/, 1)[0] ?? '';
+export function markdownTarget(raw: RawLinkRef): string | null {
+	if (isWikiOriginal(raw.original)) return null;
+	const m = MD_LINK_RE.exec(raw.original.trim());
+	let dest = m?.[1] ?? raw.linkpath;
+	if (dest.startsWith('<') && dest.endsWith('>')) dest = dest.slice(1, -1);
+	let name = dest.trim().split(/[?#]/, 1)[0] ?? '';
 	try {
 		name = decodeURIComponent(name);
 	} catch {
 		// a malformed escape: keep the text as written
 	}
 	return name.replace(/\\/g, '/').trim();
-}
-
-/** `[[...]]` / `![[...]]` is a wikilink; anything else Obsidian caches is markdown form. */
-function isWikiOriginal(original: string): boolean {
-	return original.startsWith('[[') || original.startsWith('![[');
 }
 
 export function classifyRef(raw: RawLinkRef, dest: ResolvedFile | null): RefClass {
@@ -111,7 +123,7 @@ export function classifyRef(raw: RawLinkRef, dest: ResolvedFile | null): RefClas
 		// a resolved note is a note link, plan A's
 		return dest.extension.toLowerCase() === 'md' ? { kind: 'skip' } : { kind: 'file', file: dest, raw };
 	}
-	const name = isWikiOriginal(raw.original) ? unresolvedWikiName(raw.linkpath) : unresolvedMarkdownName(raw.linkpath);
+	const name = markdownTarget(raw) ?? unresolvedWikiName(raw.linkpath);
 	// No extension, `.md`, or a dotted name the server does not read as a file
 	// (`[[Dr.Smith]]`): a note link, which the server keeps as a (pending) link.
 	if (!name || !ATTACHMENT_EXTS.has(extOf(basename(name)))) return { kind: 'skip' };

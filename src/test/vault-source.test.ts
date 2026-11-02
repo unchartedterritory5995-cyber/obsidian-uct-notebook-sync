@@ -213,6 +213,27 @@ describe('ObsidianVaultSource.resolveLink', () => {
 		}
 	});
 
+	it('resolveRef retries a markdown destination cut at ?/# and decoded once (N1)', () => {
+		const png = tfile('att/x.png');
+		const pct = tfile('att/100%25.pdf');
+		const { app, getFirstLinkpathDest } = fakeApp({ files: [png, pct], caches: {} });
+		const vs = new ObsidianVaultSource(app);
+		expect(vs.resolveRef({ original: '![](x.png?raw=1)', linkpath: 'x.png?raw=1', embed: true }, SRC)?.path)
+			.toBe('att/x.png');
+		expect(getFirstLinkpathDest).toHaveBeenLastCalledWith('x.png', SRC);
+		// the retry name is used as is: `100%25.pdf` is never decoded a second time
+		expect(vs.resolveRef({ original: '[p](100%2525.pdf?v=2)', linkpath: '100%25.pdf?v=2', embed: false }, SRC)?.path)
+			.toBe('att/100%25.pdf');
+		// a wikilink is never retried with markdown rules
+		getFirstLinkpathDest.mockClear();
+		expect(vs.resolveRef({ original: '![[x.png?raw=1]]', linkpath: 'x.png?raw=1', embed: true }, SRC)).toBeNull();
+		expect(getFirstLinkpathDest.mock.calls).toEqual([['x.png?raw=1', SRC]]);
+		// a hit on the first lookup needs no retry
+		getFirstLinkpathDest.mockClear();
+		expect(vs.resolveRef({ original: '![](x.png)', linkpath: 'x.png', embed: true }, SRC)?.path).toBe('att/x.png');
+		expect(getFirstLinkpathDest).toHaveBeenCalledTimes(1);
+	});
+
 	it('returns only a TFile dest', () => {
 		const { app } = fakeApp({ files: [], caches: {}, dest: () => ({ path: 'folder' }) as unknown as TFile });
 		expect(new ObsidianVaultSource(app).resolveLink('folder', SRC)).toBeNull();
@@ -361,7 +382,7 @@ describe('server parity fixtures', () => {
 
 			const refs: NoteAttachmentRef[] = [];
 			for (const r of vs.listRawRefs(sidecar.self_path)) {
-				const c = classifyRef(r, vs.resolveLink(r.linkpath, sidecar.self_path));
+				const c = classifyRef(r, vs.resolveRef(r, sidecar.self_path));
 				if (c.kind === 'missing') refs.push(c.ref);
 				if (c.kind === 'file') {
 					refs.push({
