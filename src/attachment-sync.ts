@@ -244,6 +244,15 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 			addIssue({ path: f.path, reason: 'upload-failed', size: f.size });
 			continue;
 		}
+		// The buffer sent is the buffer hashed (review M1). If it no longer matches the
+		// ref (the file changed since, or a cache entry went stale under the same mtime
+		// and size), the server would refuse it as a mismatch on every run: drop the
+		// cache entry instead, so the next run hashes the file afresh. The ref stays
+		// `ok` meanwhile and the server shows "retrying".
+		if (sha256HexBytes(bytes) !== sha) {
+			delete data.attachmentHashes[f.path];
+			continue;
+		}
 		const up = await transport.uploadAttachment({
 			serverUrl, token, sha256: sha, name: f.path, mime: mimeForExtension(f.extension), data: bytes,
 		});

@@ -268,6 +268,24 @@ describe('prepareAttachments', () => {
 		expect(d.attachmentHashes['att/a.png']!.sha256).toBe(shaOf(B));
 	});
 
+	it('uploads only bytes that hash to the ref sha; a stale cache entry is dropped and fixed next run (M1)', async () => {
+		const server = new FakeServer();
+		const vault = new FakeVault().note('a.md', 'x', [embed('a.png')]).file('att/a.png', B, 7);
+		// a cache entry with the same mtime and size but the hash of other bytes
+		const stale = bytes('png Z'); // same length as B
+		expect(stale.byteLength).toBe(B.byteLength);
+		const d = data({ attachmentHashes: { 'att/a.png': { mtime: 7, size: B.byteLength, sha256: shaOf(stale) } } });
+		const r1 = await run(server, vault, d);
+		expect(r1.refsByNote.get('a.md')![0]!.sha256).toBe(shaOf(stale));
+		expect(server.uploadCalls).toEqual([]); // never sends bytes under a hash they do not have
+		expect(d.attachmentHashes['att/a.png']).toBeUndefined();
+
+		const r2 = await run(server, vault, d);
+		expect(r2.refsByNote.get('a.md')![0]!.sha256).toBe(shaOf(B));
+		expect(server.uploadCalls.map((u) => u.sha256)).toEqual([shaOf(B)]);
+		for (const u of server.uploadCalls) expect(shaOf(new Uint8Array(u.data))).toBe(u.sha256);
+	});
+
 	it('enforces the server caps: original <= 2048, path <= 1024 code points, <= 5000 refs a note', async () => {
 		const server = new FakeServer();
 		const longName = `${'x'.repeat(1030)}.png`;
