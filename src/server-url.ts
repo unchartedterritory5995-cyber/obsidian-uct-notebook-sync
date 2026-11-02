@@ -33,3 +33,21 @@ export function validateServerUrl(raw: string): ServerUrlResult {
 	}
 	return { ok: true, url: parsed.origin };
 }
+
+/**
+ * Validate the saved Server URL and, when it is valid but not yet in its
+ * normalized form (a legacy `uctintelligence.com`, a value with a path), write
+ * the normalized origin back once. Callers must use the returned `url` for the
+ * request, never the raw saved string.
+ */
+export async function normalizeSavedServerUrl(
+	data: { serverUrl: string },
+	save: () => Promise<void>,
+): Promise<ServerUrlResult> {
+	const result = validateServerUrl(data.serverUrl);
+	if (result.ok && result.url !== data.serverUrl) {
+		data.serverUrl = result.url;
+		await save();
+	}
+	return result;
+}
