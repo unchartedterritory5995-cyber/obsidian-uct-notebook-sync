@@ -125,6 +125,10 @@ export interface FileState {
 	 * pushes (until its hash changes) and the manifest (it was never
 	 * actually staged, so naming it would be dishonest). */
 	tooLarge?: boolean;
+	/** The last push of this note carried a non-empty attachment list. While Obsidian
+	 * has not indexed such a note, it is deferred rather than pushed without its list
+	 * (which the server would read as "no list": notices, and its blobs GC'd). */
+	hadRefs?: boolean;
 }
 
 /** Everything persisted via Obsidian's `Plugin.loadData()`/`saveData()`

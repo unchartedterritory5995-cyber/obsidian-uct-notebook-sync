@@ -195,8 +195,10 @@ export function applySyncResult(
 				syncedAt: priorFiles[file.path]?.syncedAt ?? '',
 				tooLarge: true,
 			};
+			if (priorFiles[file.path]?.hadRefs) next[file.path]!.hadRefs = true;
 		} else if (wasPushed) {
 			next[file.path] = { hash: file.hash, syncedAt: now, tooLarge: false };
+			if ((file.attachments?.length ?? 0) > 0) next[file.path]!.hadRefs = true;
 		} else {
 			next[file.path] = priorFiles[file.path] ?? { hash: file.hash, syncedAt: now, tooLarge: false };
 		}

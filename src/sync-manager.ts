@@ -172,6 +172,16 @@ export class SyncManager {
 			const body = await this.deps.vaultSource.readFile(f.path);
 			let refs = att.refsByNote.get(f.path) ?? null;
 			const updatedAt = new Date(f.mtime).toISOString();
+			// Not indexed yet (null on a supported run), and its last push carried a
+			// list: DEFER it. Pushed list-less, the server would store NULL for it, show
+			// its images and files as unavailable and GC their blobs until the next run.
+			// Keeping the prior hash leaves it unchanged (and still manifested) this run;
+			// it pushes, with its list, once Obsidian has indexed it.
+			const prior = data.files[f.path];
+			if (att.supported && refs === null && prior?.hadRefs && !prior.tooLarge) {
+				scanned.push({ path: f.path, hash: prior.hash, updatedAt, body, attachments: null });
+				continue;
+			}
 			// A note over the batch budget already goes alone. If its refs would take even
 			// that single request past the server's 2 MB cap, the server would refuse the
 			// batch on every run and block every later one: send the text without the list

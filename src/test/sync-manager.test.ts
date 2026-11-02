@@ -516,6 +516,34 @@ describe('SyncManager.runSync with attachments', () => {
 		expect(t.pushedNotes()).toEqual([]);
 	});
 
+	it('an unindexed note whose last push carried refs is deferred, never pushed without its list', async () => {
+		const t = new FakeServer();
+		const vault = new FakeVault().note('a.md', '![[chart.png]]', [embed('chart.png')]).file('att/chart.png', B);
+		const m = mgr(t, vault);
+		await m.runSync();
+		expect(t.pushedNotes()[0]!.attachments).toHaveLength(1);
+		const firstHash = store.files['a.md']!.hash;
+
+		// edited, and Obsidian has not re-indexed it yet: deferred, not pushed list-less
+		vault.notes['a.md'] = '![[chart.png]] edited';
+		vault.refs['a.md'] = null;
+		t.reset();
+		const s = await m.runSync();
+		expect(s.ok).toBe(true);
+		expect(t.pushedNotes()).toEqual([]);
+		expect(store.files['a.md']!.hash).toBe(firstHash);
+		expect(t.ingestCalls.find((c) => c.final === true)!.manifest).toEqual(['a.md']); // still staged
+
+		// indexed again: pushed once, with its list and the new body
+		vault.refs['a.md'] = [embed('chart.png')];
+		t.reset();
+		await m.runSync();
+		expect(t.pushedNotes().map((n) => [n.body_md, n.attachments?.length])).toEqual([['![[chart.png]] edited', 1]]);
+		t.reset();
+		await m.runSync();
+		expect(t.pushedNotes()).toEqual([]);
+	});
+
 	it('too-large, missing and storage-limit refs are sent with their status and never uploaded', async () => {
 		const t = new FakeServer();
 		t.maxBytes = 4;
