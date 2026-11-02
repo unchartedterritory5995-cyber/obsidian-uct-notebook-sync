@@ -6,7 +6,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { IngestParams, RedeemParams, Transport } from '../api-client';
 import UctNotebookSyncPlugin from '../main';
-import { notices } from './obsidian-stub';
+import { notices, TFile } from './obsidian-stub';
 
 class RecordingTransport implements Transport {
 	redeemCalls: RedeemParams[] = [];
@@ -17,19 +17,21 @@ class RecordingTransport implements Transport {
 	}
 	async ingest(p: IngestParams) {
 		this.ingestCalls.push(p);
-		return {
-			ok: true as const,
-			status: 200,
-			accepted: 0,
-			tooLarge: [],
-			manifestApplied: false,
-		} as never;
+		return { ok: true as const, response: { written: 1, skipped: 0, manifestReplaced: true, tooLarge: [] } };
 	}
 }
 
 async function makePlugin(serverUrl: string, token: string | null = 'tok') {
 	const plugin = new UctNotebookSyncPlugin();
 	(plugin as any).stored = { serverUrl, deviceToken: token, vaultId: 'v1' };
+	// One real note, so a sync actually reaches the transport (an empty vault
+	// would make zero ingest calls and prove nothing about the URL used).
+	const note = Object.assign(new TFile(), { path: 'a.md', extension: 'md', basename: 'a', stat: { mtime: 1, size: 5, ctime: 1 } });
+	Object.assign((plugin as any).app.vault, {
+		getMarkdownFiles: () => [note],
+		getAbstractFileByPath: () => note,
+		cachedRead: async () => '# hello',
+	});
 	const transport = new RecordingTransport();
 	(plugin as any).transport = transport; // before onload builds the SyncManager
 	await plugin.onload();
@@ -59,6 +61,8 @@ describe('plugin wiring of the Server URL guard', () => {
 	it.each(LEGACY)('runManualSync ingests against the normalized origin for %s and saves it once', async (raw, url) => {
 		const { plugin, transport } = await makePlugin(raw);
 		await plugin.runManualSync();
+		expect(transport.ingestCalls.length).toBeGreaterThan(0);
+		expect(transport.ingestCalls).toHaveLength(2); // one data batch + the manifest call
 		for (const c of transport.ingestCalls) expect(c.serverUrl).toBe(url);
 		expect(plugin.data.serverUrl).toBe(url);
 		const normalizedSaves = (plugin as any).saveCalls.filter((d: any) => d.serverUrl === url);
@@ -94,5 +98,30 @@ describe('plugin wiring of the Server URL guard', () => {
 		expect(notices).toEqual([msg]);
 		expect(transport.ingestCalls).toHaveLength(0);
 		expect(transport.redeemCalls).toHaveLength(0);
+	});
+
+	it('a second trigger during the URL save is refused: exactly one ingest run', async () => {
+		const { plugin, transport } = await makePlugin('uctintelligence.com');
+		let release!: () => void;
+		const gate = new Promise<void>((r) => { release = r; });
+		const realSave = plugin.saveData.bind(plugin);
+		plugin.saveData = async (d: unknown) => { await gate; await realSave(d); };
+		const first = plugin.runManualSync();
+		const second = await plugin.runManualSync(); // while the first awaits the save
+		expect(second.ok).toBe(false);
+		expect(second.error).toBe('A sync is already running.');
+		release();
+		await first;
+		expect(transport.ingestCalls).toHaveLength(2); // one run = batch + manifest
+		// and the lock is released afterwards
+		const third = await plugin.runManualSync();
+		expect(third.error).not.toBe('A sync is already running.');
+	});
+
+	it('the lock is released after an invalid-URL refusal', async () => {
+		const { plugin } = await makePlugin('ftp://uctintelligence.com');
+		await plugin.runManualSync();
+		const again = await plugin.runManualSync();
+		expect(again.error).toMatch(/^Server URL is not valid/);
 	});
 });

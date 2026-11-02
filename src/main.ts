@@ -107,25 +107,28 @@ export default class UctNotebookSyncPlugin extends Plugin {
 				error: 'A sync is already running.',
 			};
 		}
-		const urlCheck = await normalizeSavedServerUrl(this.data, () => this.saveData(this.data));
-		if (!urlCheck.ok) {
-			const error = `Server URL is not valid: ${urlCheck.message}`;
-			new Notice(error);
-			return {
-				ok: false,
-				scanned: 0,
-				pushed: 0,
-				skippedUnchanged: 0,
-				tooLarge: [],
-				skippedTooLargeUnchanged: [],
-				deletedLocally: [],
-				manifestSent: false,
-				needsReconnect: false,
-				error,
-			};
-		}
+		// The lock is taken BEFORE the first await (the URL normalizer saves),
+		// so a second trigger during that save is refused, and it is released
+		// on every path out, including the invalid-URL refusal.
 		this.syncing = true;
 		try {
+			const urlCheck = await normalizeSavedServerUrl(this.data, () => this.saveData(this.data));
+			if (!urlCheck.ok) {
+				const error = `Server URL is not valid: ${urlCheck.message}`;
+				new Notice(error);
+				return {
+					ok: false,
+					scanned: 0,
+					pushed: 0,
+					skippedUnchanged: 0,
+					tooLarge: [],
+					skippedTooLargeUnchanged: [],
+					deletedLocally: [],
+					manifestSent: false,
+					needsReconnect: false,
+					error,
+				};
+			}
 			const summary = await this.syncManager.runSync();
 			new Notice(summarize(summary));
 			return summary;
