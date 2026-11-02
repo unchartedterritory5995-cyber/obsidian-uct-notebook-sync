@@ -19,6 +19,12 @@ class RecordingTransport implements Transport {
 		this.ingestCalls.push(p);
 		return { ok: true as const, response: { written: 1, skipped: 0, manifestReplaced: true, tooLarge: [] } };
 	}
+	async checkAttachments() {
+		return { ok: true as const, supported: false as const };
+	}
+	async uploadAttachment() {
+		return { ok: true as const, stored: true };
+	}
 }
 
 async function makePlugin(serverUrl: string, token: string | null = 'tok') {

@@ -5,7 +5,10 @@
  * actually holds together end to end, not just as isolated pure functions.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { IngestOutcome, IngestParams, RedeemOutcome, RedeemParams, Transport } from '../api-client';
+import type {
+	CheckOutcome, CheckParams, IngestOutcome, IngestParams, RedeemOutcome, RedeemParams, Transport,
+	UploadOutcome, UploadParams,
+} from '../api-client';
 import { SyncManager, type VaultFileRef, type VaultSource } from '../sync-manager';
 import { defaultPluginData, type PluginData } from '../types';
 
@@ -52,6 +55,35 @@ class FakeTransport implements Transport {
 		this.redeemCalls.push(params);
 		const next = this.redeemQueue.shift();
 		if (!next) throw new Error('FakeTransport.redeem called with no queued outcome');
+		return next;
+	}
+
+	// Scripted attachment calls (Plan C Task 9). With nothing queued, check answers
+	// "unsupported" (a 0.1.x server), so every pre-attachment test runs unchanged.
+	checkCalls: CheckParams[] = [];
+	uploadCalls: UploadParams[] = [];
+	private checkQueue: CheckOutcome[] = [];
+	private uploadQueue: UploadOutcome[] = [];
+
+	queueCheck(outcome: CheckOutcome): this {
+		this.checkQueue.push(outcome);
+		return this;
+	}
+
+	queueUpload(outcome: UploadOutcome): this {
+		this.uploadQueue.push(outcome);
+		return this;
+	}
+
+	async checkAttachments(params: CheckParams): Promise<CheckOutcome> {
+		this.checkCalls.push(params);
+		return this.checkQueue.shift() ?? { ok: true, supported: false };
+	}
+
+	async uploadAttachment(params: UploadParams): Promise<UploadOutcome> {
+		this.uploadCalls.push(params);
+		const next = this.uploadQueue.shift();
+		if (!next) throw new Error('FakeTransport.uploadAttachment called with no queued outcome');
 		return next;
 	}
 }

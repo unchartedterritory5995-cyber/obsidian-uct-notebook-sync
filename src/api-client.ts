@@ -12,12 +12,29 @@
  * Endpoints (contract: api/routers/note_sync.py):
  *   POST {serverUrl}/api/j2/notes/connectors/obsidian/redeem
  *   POST {serverUrl}/api/j2/notes/connectors/obsidian/ingest   (Bearer token)
+ *   POST {serverUrl}/api/j2/notes/connectors/obsidian/attachments/check   (Bearer token)
+ *   PUT  {serverUrl}/api/j2/notes/connectors/obsidian/attachments/{sha256} (Bearer token)
+ *
+ * Every request carries `X-UCT-Plugin-Version` (`PLUGIN_VERSION_HEADER` in
+ * note_sync.py), which the server records per device to know this plugin sends
+ * attachment refs.
  */
 import { requestUrl } from 'obsidian';
+import manifest from '../manifest.json';
 import type { IngestRequestBody, IngestResponse, NoteInput, RedeemResponse } from './types';
 
 const REDEEM_PATH = '/api/j2/notes/connectors/obsidian/redeem';
 const INGEST_PATH = '/api/j2/notes/connectors/obsidian/ingest';
+const ATTACHMENTS_PATH = '/api/j2/notes/connectors/obsidian/attachments';
+
+/** This build's version, from manifest.json (esbuild inlines the JSON). */
+export const PLUGIN_VERSION: string = manifest.version;
+const VERSION_HEADER = 'X-UCT-Plugin-Version';
+const NAME_HEADER = 'X-UCT-Attachment-Name';
+/** The server's `_MAX_ATTACHMENT_CHECK_HASHES`: a check over more is a 400. */
+export const MAX_CHECK_HASHES = 5000;
+/** `ATTACHMENT_PROTOCOL_VERSION` in note_sync.py. */
+const ATTACHMENT_PROTOCOL = 1;
 
 export function joinUrl(serverUrl: string, path: string): string {
 	const base = serverUrl.replace(/\/+$/, '');
@@ -52,9 +69,68 @@ export type IngestOutcome =
 	// way (see the module docstring on sync-manager.ts).
 	| { ok: false; status: number; message: string; authExpired: boolean };
 
+export interface CheckParams {
+	serverUrl: string;
+	token: string;
+	sha256: string[];
+}
+
+/** `supported: false` = this server has no attachment routes (an older server, the
+ * `NOTE_SYNC_OBSIDIAN_ATTACHMENTS_ENABLED=0` kill switch, an SPA fallback page): the
+ * plugin syncs text-only, as 0.1.x did. */
+export type CheckOutcome =
+	| { ok: true; supported: false }
+	| { ok: true; supported: true; missing: string[]; maxBytes: number; remainingBytes: number }
+	| { ok: false; status: number; message: string; authExpired: boolean };
+
+export interface UploadParams {
+	serverUrl: string;
+	token: string;
+	sha256: string;
+	name: string;
+	mime: string;
+	data: ArrayBuffer;
+}
+
+export type UploadOutcome =
+	| { ok: true; stored: boolean }
+	| {
+		ok: false;
+		status: number;
+		message: string;
+		authExpired: boolean;
+		/** 413 naming the member's storage: no later upload this run can fit either. */
+		storageFull: boolean;
+		/** 429 (the server's in-flight upload cap: 2 per member, 8 per pod) or 503
+		 * (storage temporarily full, server not configured): nothing is wrong with
+		 * this blob; the next sync's check finds it missing and uploads it again. Never
+		 * reported as a failure. */
+		retryLater: boolean;
+	};
+
 export interface Transport {
 	redeem(params: RedeemParams): Promise<RedeemOutcome>;
 	ingest(params: IngestParams): Promise<IngestOutcome>;
+	checkAttachments(params: CheckParams): Promise<CheckOutcome>;
+	uploadAttachment(params: UploadParams): Promise<UploadOutcome>;
+}
+
+function errorMessage(e: unknown): string {
+	return e instanceof Error && e.message ? e.message : String(e);
+}
+
+/** A response body as JSON, or undefined (an HTML page, an empty body). Never throws:
+ * Obsidian's `res.json` getter throws on a non-JSON body. */
+function parseJson(text: string): unknown {
+	try {
+		return JSON.parse(text) as unknown;
+	} catch {
+		return undefined;
+	}
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+	return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
 /** Best-effort extraction of FastAPI's `{"detail": "..."}` error shape;
@@ -77,6 +153,7 @@ export class ObsidianHttpTransport implements Transport {
 			method: 'POST',
 			contentType: 'application/json',
 			throw: false,
+			headers: { [VERSION_HEADER]: PLUGIN_VERSION },
 			body: JSON.stringify({ code: params.code, vaultId: params.vaultId, label: params.label }),
 		});
 		if (res.status >= 200 && res.status < 300) {
@@ -96,7 +173,7 @@ export class ObsidianHttpTransport implements Transport {
 			method: 'POST',
 			contentType: 'application/json',
 			throw: false,
-			headers: { Authorization: `Bearer ${params.token}` },
+			headers: { Authorization: `Bearer ${params.token}`, [VERSION_HEADER]: PLUGIN_VERSION },
 			body: JSON.stringify(body),
 		});
 		if (res.status >= 200 && res.status < 300) {
@@ -110,6 +187,110 @@ export class ObsidianHttpTransport implements Transport {
 			// the device token is missing/invalid/revoked
 			// (`_authenticate_obsidian_device`) — never a transient blip.
 			authExpired: res.status === 401,
+		};
+	}
+
+	/**
+	 * Which of `sha256` this device's (member, vault) lacks, plus the server's limits.
+	 * Sent in requests of at most `MAX_CHECK_HASHES`; `missing` is concatenated in
+	 * request order and the limits are the last response's. An empty list still asks:
+	 * that is how the protocol and limits are learned.
+	 */
+	async checkAttachments(params: CheckParams): Promise<CheckOutcome> {
+		const chunks: string[][] = [];
+		for (let i = 0; i < params.sha256.length; i += MAX_CHECK_HASHES) {
+			chunks.push(params.sha256.slice(i, i + MAX_CHECK_HASHES));
+		}
+		if (chunks.length === 0) chunks.push([]);
+		const missing: string[] = [];
+		let limits = { maxBytes: 0, remainingBytes: 0 };
+		for (const chunk of chunks) {
+			const one = await this.checkOnce(params, chunk);
+			if (!one.ok || !one.supported) return one;
+			missing.push(...one.missing);
+			limits = { maxBytes: one.maxBytes, remainingBytes: one.remainingBytes };
+		}
+		return { ok: true, supported: true, missing, ...limits };
+	}
+
+	private async checkOnce(params: CheckParams, sha256: string[]): Promise<CheckOutcome> {
+		let res;
+		try {
+			res = await requestUrl({
+				url: joinUrl(params.serverUrl, `${ATTACHMENTS_PATH}/check`),
+				method: 'POST',
+				contentType: 'application/json',
+				throw: false,
+				headers: { Authorization: `Bearer ${params.token}`, [VERSION_HEADER]: PLUGIN_VERSION },
+				body: JSON.stringify({ sha256 }),
+			});
+		} catch (e) {
+			return { ok: false, status: 0, message: errorMessage(e), authExpired: false };
+		}
+		// 404 (no such route, or the attachments flag off) and 405 (a server whose
+		// catch-all answers this path for GET only) mean "no attachment support".
+		if (res.status === 404 || res.status === 405) return { ok: true, supported: false };
+		if (res.status < 200 || res.status >= 300) {
+			return {
+				ok: false, status: res.status, message: extractDetail(res.text, res.status),
+				authExpired: res.status === 401,
+			};
+		}
+		const body = parseJson(res.text);
+		// A 2xx that is not protocol 1 (an SPA fallback page, a future protocol) is a
+		// server this plugin cannot speak attachments to.
+		if (!isRecord(body) || body.protocol !== ATTACHMENT_PROTOCOL) return { ok: true, supported: false };
+		const { missing, maxBytes, remainingBytes } = body;
+		if (!Array.isArray(missing) || !missing.every((h) => typeof h === 'string')
+			|| typeof maxBytes !== 'number' || typeof remainingBytes !== 'number') {
+			return { ok: false, status: res.status, message: 'Unexpected attachment check response.', authExpired: false };
+		}
+		return { ok: true, supported: true, missing: missing as string[], maxBytes, remainingBytes };
+	}
+
+	/**
+	 * `PUT .../attachments/{sha256}` with the raw bytes. The name header is the BASE
+	 * name, percent-encoded: the server decodes it once and refuses a `/` in it.
+	 */
+	async uploadAttachment(params: UploadParams): Promise<UploadOutcome> {
+		const name = params.name.slice(params.name.lastIndexOf('/') + 1);
+		let res;
+		try {
+			res = await requestUrl({
+				url: joinUrl(params.serverUrl, `${ATTACHMENTS_PATH}/${params.sha256}`),
+				method: 'PUT',
+				body: params.data,
+				contentType: params.mime,
+				throw: false,
+				headers: {
+					Authorization: `Bearer ${params.token}`,
+					[VERSION_HEADER]: PLUGIN_VERSION,
+					[NAME_HEADER]: encodeURIComponent(name),
+				},
+			});
+		} catch (e) {
+			return {
+				ok: false, status: 0, message: errorMessage(e), authExpired: false, storageFull: false, retryLater: false,
+			};
+		}
+		if (res.status >= 200 && res.status < 300) {
+			const body = parseJson(res.text);
+			if (isRecord(body) && typeof body.stored === 'boolean') return { ok: true, stored: body.stored };
+			return {
+				ok: false, status: res.status, message: 'Unexpected attachment upload response.',
+				authExpired: false, storageFull: false, retryLater: false,
+			};
+		}
+		const message = extractDetail(res.text, res.status);
+		return {
+			ok: false,
+			status: res.status,
+			message,
+			authExpired: res.status === 401,
+			// note_sync.py: a 413 is either the per-file cap ("attachment is too large")
+			// or the member's room (`NO_ROOM_DETAIL`, "Your UCT storage ... is full").
+			storageFull: res.status === 413 && /storage/i.test(message),
+			retryLater: res.status === 429 || res.status === 503,
 		};
 	}
 }
