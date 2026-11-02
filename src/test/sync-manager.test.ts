@@ -662,6 +662,40 @@ describe('SyncManager.runSync with attachments', () => {
 		expect(t.pushedNotes()).toEqual([]); // stable: no re-push every run
 	});
 
+	it('a note whose body alone is over the 2 MB ingest cap is skipped and listed; every other note still syncs', async () => {
+		const t = new FakeServer();
+		const vault = new FakeVault()
+			.note('huge.md', 'h'.repeat(2_100_000), [])
+			.note('a.md', '# a', []);
+		const m = mgr(t, vault);
+		const s1 = await m.runSync();
+		expect(s1.ok).toBe(true);
+		expect(t.pushedNotes().map((n) => n.vault_path)).toEqual(['a.md']);
+		expect(s1.tooLarge).toEqual(['huge.md']);
+		expect(store.files['huge.md']).toMatchObject({ tooLarge: true }); // listed in Settings
+		const final1 = t.ingestCalls.find((c) => c.final === true)!;
+		expect(final1.manifest).toEqual(['a.md']); // never staged, so never manifested
+		for (const c of t.ingestCalls) {
+			const body = JSON.stringify({ consent: true, notes: c.notes, manifest: c.manifest, final: c.final });
+			expect(new TextEncoder().encode(body).length).toBeLessThanOrEqual(2_000_000);
+		}
+
+		// every later run still syncs the rest; the huge note is not retried while unchanged
+		vault.notes['a.md'] = '# a, edited';
+		t.reset();
+		const s2 = await m.runSync();
+		expect(s2.ok).toBe(true);
+		expect(t.pushedNotes().map((n) => n.vault_path)).toEqual(['a.md']);
+		expect(s2.skippedTooLargeUnchanged).toEqual(['huge.md']);
+
+		// shortened: retried and pushed
+		vault.notes['huge.md'] = '# now small';
+		t.reset();
+		await m.runSync();
+		expect(t.pushedNotes().map((n) => n.vault_path)).toEqual(['huge.md']);
+		expect(store.files['huge.md']!.tooLarge).toBe(false);
+	});
+
 	it('a 403 on upload stops uploads but the notes are still pushed', async () => {
 		const t = new FakeServer();
 		t.uploadScript = [uploadFailure(403, 'Upgrade required')];

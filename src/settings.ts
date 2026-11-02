@@ -225,7 +225,7 @@ export class UctNotebookSyncSettingTab extends PluginSettingTab {
 			.setHeading();
 		containerEl.createEl('p', {
 			text:
-				'These notes are too large to store once converted, so they are skipped rather than ' +
+				'These notes are too large to send (over 2 MB) or to store once converted, so they are skipped rather than ' +
 				'retried on every sync. Shorten a note and it will be retried automatically on the next sync.',
 		});
 		const list = containerEl.createEl('ul');

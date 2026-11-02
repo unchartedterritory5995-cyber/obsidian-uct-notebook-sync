@@ -46,7 +46,7 @@ import {
 import { noteContentHash } from './attachment-refs';
 import { prepareAttachments } from './attachment-sync';
 import { applySyncResult, finalizeManifest, planSync } from './sync-plan';
-import type { PluginData, ScannedFile } from './types';
+import type { NoteInput, PluginData, ScannedFile } from './types';
 import type { Transport } from './api-client';
 import type { RawLinkRef, ResolvedFile } from './attachment-refs';
 
@@ -178,8 +178,10 @@ export class SyncManager {
 			// (the server shows its images and files as unavailable) and say so in
 			// Settings (review M3). A body alone over the cap is refused as in 0.1.x.
 			if (refs !== null && refs.length > 0) {
-				const probe = { vault_path: f.path, content_hash: '0'.repeat(64), body_md: body, updated_at: updatedAt, attachments: refs };
-				if (singleNoteRequestBytes(probe) > MAX_INGEST_BYTES) {
+				const bare: NoteInput = { vault_path: f.path, content_hash: '0'.repeat(64), body_md: body, updated_at: updatedAt };
+				// (a body over the cap on its own is not sent at all; see below)
+				if (singleNoteRequestBytes(bare) <= MAX_INGEST_BYTES
+					&& singleNoteRequestBytes({ ...bare, attachments: refs }) > MAX_INGEST_BYTES) {
 					refs = null;
 					data.attachmentIssues.push({ path: f.path, reason: 'note-too-large-for-files', size: 0 });
 				}
@@ -195,9 +197,20 @@ export class SyncManager {
 		}
 
 		const plan = planSync(scanned, data.files);
+		const tooLargeThisRun = new Set<string>();
+		// A note whose request alone is over the server's 2 MB ingest cap would be
+		// refused with its whole batch, on every run, and stall the vault there. It is
+		// not sent: it is recorded too large exactly as a server `tooLarge` verdict is,
+		// so Settings lists it, the run goes on with every other note, and it is retried
+		// only once its content changes (sync-plan's tooLarge rule).
+		const sendable: NoteInput[] = [];
+		for (const note of plan.toPush) {
+			if (singleNoteRequestBytes(note) > MAX_INGEST_BYTES) tooLargeThisRun.add(note.vault_path);
+			else sendable.push(note);
+		}
+		plan.toPush = sendable;
 		const batches = buildBatches(plan.toPush, this.deps.batchOptions ?? DEFAULT_BATCH_OPTIONS);
 
-		const tooLargeThisRun = new Set<string>();
 		let pushed = 0;
 
 		// Persists `lastSyncError` (and clears a dead token on a 401) BEFORE
