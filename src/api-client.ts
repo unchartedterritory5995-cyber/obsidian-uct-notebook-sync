@@ -101,10 +101,10 @@ export type UploadOutcome =
 		authExpired: boolean;
 		/** 413 naming the member's storage: no later upload this run can fit either. */
 		storageFull: boolean;
-		/** 429 (the server's in-flight upload cap: 2 per member, 8 per pod) or 503
-		 * (storage temporarily full, server not configured): nothing is wrong with
-		 * this blob; the next sync's check finds it missing and uploads it again. Never
-		 * reported as a failure. */
+		/** 429 (the server's in-flight upload cap: 2 per member, 8 per pod), 503
+		 * (storage temporarily full, server not configured) or 404/405 (attachments
+		 * switched off mid-run): nothing is wrong with this blob; the next sync's check
+		 * finds it missing and uploads it again. Never reported as a failure. */
 		retryLater: boolean;
 	};
 
@@ -133,6 +133,46 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 	return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
+/** `res.json` without its throw: Obsidian's getter throws on a non-JSON body. */
+function safeJson(res: { json: unknown }): unknown {
+	try {
+		return res.json;
+	} catch {
+		return undefined;
+	}
+}
+
+const SHA_RE = /^[0-9a-f]{64}$/;
+/** `_MAX_ATTACHMENT_NAME_CHARS` in note_sync.py, counted in code points (Python `len`). */
+const MAX_NAME_CODE_POINTS = 255;
+
+/**
+ * The upload's name, shaped so the server's `note_sync.py::_attachment_name` always
+ * accepts it (the server stores the name and never reads it back, so a 400 here would
+ * only lose the file): the base name after the last `/`; `\`, every code point below
+ * 0x20 and 0x7F become `_`; a lone surrogate becomes U+FFFD (else `encodeURIComponent`
+ * throws); over 255 code points it is cut, keeping the extension. `null` (send no
+ * header, which the server accepts) for an empty name, `.` or `..`.
+ */
+export function uploadName(path: string): string | null {
+	const base = path.slice(path.lastIndexOf('/') + 1);
+	let cps = Array.from(base, (c) => {
+		const code = c.codePointAt(0) ?? 0;
+		if (c === '\\' || code < 0x20 || code === 0x7f) return '_';
+		if (code >= 0xd800 && code <= 0xdfff) return '�';
+		return c;
+	});
+	if (cps.length > MAX_NAME_CODE_POINTS) {
+		const dot = cps.lastIndexOf('.');
+		const ext = dot > 0 ? cps.slice(dot) : [];
+		cps = ext.length < MAX_NAME_CODE_POINTS
+			? [...cps.slice(0, MAX_NAME_CODE_POINTS - ext.length), ...ext]
+			: cps.slice(0, MAX_NAME_CODE_POINTS);
+	}
+	const name = cps.join('');
+	return name === '' || name === '.' || name === '..' ? null : name;
+}
+
 /** Best-effort extraction of FastAPI's `{"detail": "..."}` error shape;
  * falls back to a generic message for anything else (a proxy error page,
  * an empty body, malformed JSON). Never throws. */
@@ -147,18 +187,30 @@ function extractDetail(bodyText: string, status: number): string {
 }
 
 export class ObsidianHttpTransport implements Transport {
+	// redeem and ingest never throw (Task 9 review, Info 1): a network error is a
+	// `status: 0` outcome, and a 2xx whose body is not the expected JSON is a failure,
+	// never a crash in the caller.
 	async redeem(params: RedeemParams): Promise<RedeemOutcome> {
-		const res = await requestUrl({
-			url: joinUrl(params.serverUrl, REDEEM_PATH),
-			method: 'POST',
-			contentType: 'application/json',
-			throw: false,
-			headers: { [VERSION_HEADER]: PLUGIN_VERSION },
-			body: JSON.stringify({ code: params.code, vaultId: params.vaultId, label: params.label }),
-		});
+		let res;
+		try {
+			res = await requestUrl({
+				url: joinUrl(params.serverUrl, REDEEM_PATH),
+				method: 'POST',
+				contentType: 'application/json',
+				throw: false,
+				headers: { [VERSION_HEADER]: PLUGIN_VERSION },
+				body: JSON.stringify({ code: params.code, vaultId: params.vaultId, label: params.label }),
+			});
+		} catch (e) {
+			return { ok: false, status: 0, message: errorMessage(e) };
+		}
 		if (res.status >= 200 && res.status < 300) {
-			const body = res.json as RedeemResponse;
-			return { ok: true, deviceId: body.deviceId, token: body.token, vaultId: body.vaultId };
+			const body = safeJson(res) as Partial<RedeemResponse> | undefined;
+			if (isRecord(body) && typeof body.deviceId === 'string' && typeof body.token === 'string'
+				&& typeof body.vaultId === 'string') {
+				return { ok: true, deviceId: body.deviceId, token: body.token, vaultId: body.vaultId };
+			}
+			return { ok: false, status: res.status, message: 'Unexpected response from the server.' };
 		}
 		return { ok: false, status: res.status, message: extractDetail(res.text, res.status) };
 	}
@@ -168,16 +220,26 @@ export class ObsidianHttpTransport implements Transport {
 		if (params.manifest !== undefined) body.manifest = params.manifest;
 		if (params.final !== undefined) body.final = params.final;
 
-		const res = await requestUrl({
-			url: joinUrl(params.serverUrl, INGEST_PATH),
-			method: 'POST',
-			contentType: 'application/json',
-			throw: false,
-			headers: { Authorization: `Bearer ${params.token}`, [VERSION_HEADER]: PLUGIN_VERSION },
-			body: JSON.stringify(body),
-		});
+		let res;
+		try {
+			res = await requestUrl({
+				url: joinUrl(params.serverUrl, INGEST_PATH),
+				method: 'POST',
+				contentType: 'application/json',
+				throw: false,
+				headers: { Authorization: `Bearer ${params.token}`, [VERSION_HEADER]: PLUGIN_VERSION },
+				body: JSON.stringify(body),
+			});
+		} catch (e) {
+			return { ok: false, status: 0, message: errorMessage(e), authExpired: false };
+		}
 		if (res.status >= 200 && res.status < 300) {
-			return { ok: true, response: res.json as IngestResponse };
+			const r = safeJson(res);
+			if (isRecord(r) && typeof r.written === 'number' && typeof r.skipped === 'number'
+				&& typeof r.manifestReplaced === 'boolean' && Array.isArray(r.tooLarge)) {
+				return { ok: true, response: r as unknown as IngestResponse };
+			}
+			return { ok: false, status: res.status, message: 'Unexpected response from the server.', authExpired: false };
 		}
 		return {
 			ok: false,
@@ -253,7 +315,18 @@ export class ObsidianHttpTransport implements Transport {
 	 * name, percent-encoded: the server decodes it once and refuses a `/` in it.
 	 */
 	async uploadAttachment(params: UploadParams): Promise<UploadOutcome> {
-		const name = params.name.slice(params.name.lastIndexOf('/') + 1);
+		if (!SHA_RE.test(params.sha256)) {
+			return {
+				ok: false, status: 0, message: 'Attachment hash must be 64 lowercase hex characters.',
+				authExpired: false, storageFull: false, retryLater: false,
+			};
+		}
+		const name = uploadName(params.name);
+		const headers: Record<string, string> = {
+			Authorization: `Bearer ${params.token}`,
+			[VERSION_HEADER]: PLUGIN_VERSION,
+		};
+		if (name !== null) headers[NAME_HEADER] = encodeURIComponent(name);
 		let res;
 		try {
 			res = await requestUrl({
@@ -262,11 +335,7 @@ export class ObsidianHttpTransport implements Transport {
 				body: params.data,
 				contentType: params.mime,
 				throw: false,
-				headers: {
-					Authorization: `Bearer ${params.token}`,
-					[VERSION_HEADER]: PLUGIN_VERSION,
-					[NAME_HEADER]: encodeURIComponent(name),
-				},
+				headers,
 			});
 		} catch (e) {
 			return {
@@ -290,7 +359,10 @@ export class ObsidianHttpTransport implements Transport {
 			// note_sync.py: a 413 is either the per-file cap ("attachment is too large")
 			// or the member's room (`NO_ROOM_DETAIL`, "Your UCT storage ... is full").
 			storageFull: res.status === 413 && /storage/i.test(message),
-			retryLater: res.status === 429 || res.status === 503,
+			// 429: the server's in-flight upload cap. 503: storage temporarily full, or not
+			// configured. 404/405: attachments switched off (or rolled back) since the
+			// check; the next sync's check decides (review M2).
+			retryLater: res.status === 429 || res.status === 503 || res.status === 404 || res.status === 405,
 		};
 	}
 }

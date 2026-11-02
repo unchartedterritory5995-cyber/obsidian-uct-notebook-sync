@@ -283,6 +283,73 @@ describe('ObsidianHttpTransport attachments', () => {
 		expect(await upload()).toMatchObject({ ok: false, status: 401, authExpired: true, storageFull: false, retryLater: false });
 	});
 
+	it('upload: every name the server would refuse is shaped to pass its _attachment_name rule (M1)', async () => {
+		// A JS port of note_sync.py::_attachment_name's refusal, applied to the decoded header.
+		const serverRefuses = (decoded: string) =>
+			Array.from(decoded).length > 255 || decoded.includes('/') || decoded.includes('\\')
+			|| Array.from(decoded).some((c) => c.codePointAt(0)! < 0x20 || c.codePointAt(0) === 0x7f)
+			|| decoded === '.' || decoded === '..';
+		const longStem = 'x'.repeat(300);
+		const cases: [string, string | undefined][] = [
+			['a\\b.png', 'a_b.png'],
+			['tab\there.png', 'tab_here.png'],
+			['line\nbreak.png', 'line_break.png'],
+			['del\u007f.png', 'del_.png'],
+			['bad\ud800half.png', 'bad�half.png'],
+			[`${longStem}.png`, `${'x'.repeat(251)}.png`],
+			[`${'😀'.repeat(300)}.png`, `${'😀'.repeat(251)}.png`],
+			['dir/..', undefined],
+			['.', undefined],
+			['folder/', undefined],
+		];
+		for (const [name, want] of cases) {
+			requestUrlMock.mockReset();
+			requestUrlMock.mockResolvedValueOnce(respond(200, { stored: true }));
+			expect(await upload({ name })).toEqual({ ok: true, stored: true });
+			const header = requestUrlMock.mock.calls[0][0].headers['X-UCT-Attachment-Name'] as string | undefined;
+			if (want === undefined) {
+				expect(header).toBeUndefined();
+				continue;
+			}
+			const decoded = decodeURIComponent(header!);
+			expect(decoded).toBe(want);
+			expect(serverRefuses(decoded)).toBe(false);
+		}
+	});
+
+	it('upload: a PUT 404 or 405 (attachments switched off mid-run) is retry-later (M2)', async () => {
+		for (const status of [404, 405]) {
+			requestUrlMock.mockResolvedValueOnce(respond(status, { detail: 'Not Found' }));
+			expect(await upload()).toMatchObject({ ok: false, status, retryLater: true, storageFull: false, authExpired: false });
+		}
+	});
+
+	it('upload: a sha that is not 64 lowercase hex is a failure without a request', async () => {
+		for (const sha256 of ['A'.repeat(64), 'a'.repeat(63), '../x', '']) {
+			expect(await upload({ sha256 })).toMatchObject({ ok: false, status: 0, retryLater: false, storageFull: false });
+		}
+		expect(requestUrlMock).not.toHaveBeenCalled();
+	});
+
+	it('redeem and ingest never throw: a network error or a non-JSON 2xx is a failure outcome', async () => {
+		const t = new ObsidianHttpTransport();
+		requestUrlMock.mockRejectedValueOnce(new Error('net::ERR_NAME_NOT_RESOLVED'));
+		expect(await t.redeem({ serverUrl: SERVER, code: 'C', vaultId: 'v', label: null }))
+			.toEqual({ ok: false, status: 0, message: 'net::ERR_NAME_NOT_RESOLVED' });
+		requestUrlMock.mockResolvedValueOnce(respond(200, '<html>SPA</html>'));
+		expect(await t.redeem({ serverUrl: SERVER, code: 'C', vaultId: 'v', label: null }))
+			.toMatchObject({ ok: false, status: 200 });
+		requestUrlMock.mockRejectedValueOnce(new Error('net::ERR_CONNECTION_RESET'));
+		expect(await t.ingest({ serverUrl: SERVER, token: 't', notes: [] }))
+			.toEqual({ ok: false, status: 0, message: 'net::ERR_CONNECTION_RESET', authExpired: false });
+		requestUrlMock.mockResolvedValueOnce(respond(200, '<html>SPA</html>'));
+		expect(await t.ingest({ serverUrl: SERVER, token: 't', notes: [] }))
+			.toMatchObject({ ok: false, status: 200, authExpired: false });
+		requestUrlMock.mockResolvedValueOnce(respond(200, { unexpected: true }));
+		expect(await t.ingest({ serverUrl: SERVER, token: 't', notes: [] }))
+			.toMatchObject({ ok: false, status: 200, authExpired: false });
+	});
+
 	it('a thrown network error is an outcome, never an exception', async () => {
 		requestUrlMock.mockRejectedValueOnce(new Error('net::ERR_CONNECTION_REFUSED'));
 		expect(await check()).toEqual({
