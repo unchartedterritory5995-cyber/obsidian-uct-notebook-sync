@@ -9,6 +9,14 @@ import { Notice, PluginSettingTab, Setting } from 'obsidian';
 import type { App } from 'obsidian';
 import type UctNotebookSyncPlugin from './main';
 import { validateServerUrl } from './server-url';
+import type { AttachmentIssue } from './types';
+
+const ATTACHMENT_REASON_TEXT: Record<AttachmentIssue['reason'], string> = {
+	'too-large': 'larger than 25 MB',
+	missing: 'not found in this vault',
+	'storage-limit': 'UCT storage is full',
+	'upload-failed': 'upload failed, will retry on the next sync',
+};
 
 export class UctNotebookSyncSettingTab extends PluginSettingTab {
 	private connectCode = '';
@@ -64,7 +72,30 @@ export class UctNotebookSyncSettingTab extends PluginSettingTab {
 			this.renderDisconnected(containerEl);
 		}
 
+		new Setting(containerEl)
+			.setName('Sync images and files')
+			.setDesc('Send the images and files your notes use (up to 25 MB each). Turn off to send note text only.')
+			.addToggle((toggle) =>
+				toggle.setValue(data.syncAttachments).onChange(async (value) => {
+					data.syncAttachments = value;
+					await this.plugin.saveData(data);
+				}),
+			);
+
 		this.renderTooLarge(containerEl);
+		this.renderAttachmentIssues(containerEl);
+	}
+
+	private renderAttachmentIssues(containerEl: HTMLElement): void {
+		const issues = this.plugin.data.attachmentIssues;
+		if (issues.length === 0) return;
+		new Setting(containerEl)
+			.setName(`Images and files that could not sync (${issues.length})`)
+			.setHeading();
+		const list = containerEl.createEl('ul');
+		for (const issue of issues) {
+			list.createEl('li', { text: `${issue.path}: ${issue.message ?? ATTACHMENT_REASON_TEXT[issue.reason]}` });
+		}
 	}
 
 	private renderConnected(containerEl: HTMLElement): void {

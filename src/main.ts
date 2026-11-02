@@ -94,18 +94,7 @@ export default class UctNotebookSyncPlugin extends Plugin {
 	async runManualSync(): Promise<SyncSummary> {
 		if (this.syncing) {
 			new Notice('A sync is already running.');
-			return {
-				ok: false,
-				scanned: 0,
-				pushed: 0,
-				skippedUnchanged: 0,
-				tooLarge: [],
-				skippedTooLargeUnchanged: [],
-				deletedLocally: [],
-				manifestSent: false,
-				needsReconnect: false,
-				error: 'A sync is already running.',
-			};
+			return refusedSummary('A sync is already running.');
 		}
 		// The lock is taken BEFORE the first await (the URL normalizer saves),
 		// so a second trigger during that save is refused, and it is released
@@ -116,26 +105,42 @@ export default class UctNotebookSyncPlugin extends Plugin {
 			if (!urlCheck.ok) {
 				const error = `Server URL is not valid: ${urlCheck.message}`;
 				new Notice(error);
-				return {
-					ok: false,
-					scanned: 0,
-					pushed: 0,
-					skippedUnchanged: 0,
-					tooLarge: [],
-					skippedTooLargeUnchanged: [],
-					deletedLocally: [],
-					manifestSent: false,
-					needsReconnect: false,
-					error,
-				};
+				return refusedSummary(error);
 			}
 			const summary = await this.syncManager.runSync();
 			new Notice(summarize(summary));
+			if (summary.ok && summary.attachmentsSupported && this.data.syncAttachments
+				&& !this.data.attachmentsNoticeShown) {
+				new Notice(
+					'UCT Notebook Sync now also sends the images and files your notes use. ' +
+					'You can turn this off in its settings.',
+				);
+				this.data.attachmentsNoticeShown = true;
+				await this.saveData(this.data);
+			}
 			return summary;
 		} finally {
 			this.syncing = false;
 		}
 	}
+}
+
+function refusedSummary(error: string): SyncSummary {
+	return {
+		ok: false,
+		scanned: 0,
+		pushed: 0,
+		skippedUnchanged: 0,
+		tooLarge: [],
+		skippedTooLargeUnchanged: [],
+		deletedLocally: [],
+		manifestSent: false,
+		needsReconnect: false,
+		attachmentsSupported: false,
+		attachmentsSent: 0,
+		attachmentIssues: 0,
+		error,
+	};
 }
 
 function summarize(summary: SyncSummary): string {
@@ -151,6 +156,12 @@ function summarize(summary: SyncSummary): string {
 	}
 	if (summary.deletedLocally.length > 0) {
 		parts.push(`${summary.deletedLocally.length} removed`);
+	}
+	if (summary.attachmentsSent > 0) {
+		parts.push(`${summary.attachmentsSent} image/file${summary.attachmentsSent === 1 ? '' : 's'} sent`);
+	}
+	if (summary.attachmentIssues > 0) {
+		parts.push(`${summary.attachmentIssues} could not be sent (see Settings)`);
 	}
 	return `UCT Notebook Sync: ${parts.join(', ')}.`;
 }

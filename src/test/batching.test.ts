@@ -12,6 +12,19 @@ function note(path: string, bodyLen = 10): NoteInput {
 }
 
 describe('buildBatches', () => {
+	it('counts attachment refs toward the batch byte budget', () => {
+		const ref = {
+			original: `![[${'n'.repeat(400)}.png]]`, embed: true, path: `att/${'n'.repeat(400)}.png`,
+			size: 1, sha256: 'a'.repeat(64), status: 'ok' as const,
+		};
+		const withRefs = (p: string): NoteInput => ({ ...note(p, 10), attachments: [ref] });
+		// body 10 + overhead 512 = 522 a note: two fit in 1100 bytes without refs...
+		const opts: BatchOptions = { maxNotes: 1000, maxBytes: 1100 };
+		expect(buildBatches([note('a.md'), note('b.md')], opts).map((b) => b.length)).toEqual([2]);
+		// ...but each ref adds ~900 JSON bytes, so the same two notes split
+		expect(buildBatches([withRefs('a.md'), withRefs('b.md')], opts).map((b) => b.length)).toEqual([1, 1]);
+	});
+
 	it('returns an empty array for no notes', () => {
 		expect(buildBatches([])).toEqual([]);
 	});

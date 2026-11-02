@@ -80,6 +80,11 @@ export class ObsidianVaultSource implements VaultSource {
 		});
 	}
 
+	isIndexed(notePath: string): boolean {
+		const file = this.app.vault.getAbstractFileByPath(notePath);
+		return file instanceof TFile && this.app.metadataCache.getFileCache(file) !== null;
+	}
+
 	listRawRefs(notePath: string): RawLinkRef[] {
 		const file = this.app.vault.getAbstractFileByPath(notePath);
 		if (!(file instanceof TFile)) return [];

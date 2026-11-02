@@ -92,6 +92,18 @@ export interface ScannedFile {
 	/** ISO-8601, derived from the file's own mtime. */
 	updatedAt: string;
 	body: string;
+	/** The note's attachment refs; `null` = send none (a server without attachment
+	 * support, or a note Obsidian has not indexed yet), and the field is omitted. */
+	attachments: NoteAttachmentRef[] | null;
+}
+
+/** One image or file that could not come over, shown in Settings. */
+export interface AttachmentIssue {
+	path: string;
+	reason: 'too-large' | 'missing' | 'storage-limit' | 'upload-failed';
+	size: number;
+	/** The server's own sentence, when one failure stands for the whole run (a 403). */
+	message?: string;
 }
 
 /** Everything the plugin remembers, per vault_path, between sync runs. */
@@ -132,6 +144,15 @@ export interface PluginData {
 	/** Per-vault_path sync bookkeeping. Entries are garbage-collected the
 	 * moment a path disappears from a vault scan (see applySyncResult). */
 	files: Record<string, FileState>;
+	/** Send the images and files notes use (plugin 0.2.0). Default on. */
+	syncAttachments: boolean;
+	/** Vault path -> the sha256 last computed for it, reused while mtime and size match.
+	 * Entries for paths no note references any more are dropped each run. */
+	attachmentHashes: Record<string, { mtime: number; size: number; sha256: string }>;
+	/** What could not come over in the last run (replaced each run). */
+	attachmentIssues: AttachmentIssue[];
+	/** The one-time "now also sends images and files" notice was shown. */
+	attachmentsNoticeShown: boolean;
 }
 
 /**
@@ -169,5 +190,9 @@ export function defaultPluginData(vaultId: string): PluginData {
 		lastSyncAt: null,
 		lastSyncError: null,
 		files: {},
+		syncAttachments: true,
+		attachmentHashes: {},
+		attachmentIssues: [],
+		attachmentsNoticeShown: false,
 	};
 }

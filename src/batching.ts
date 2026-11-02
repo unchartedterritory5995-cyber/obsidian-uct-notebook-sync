@@ -62,7 +62,9 @@ export function buildBatches(
 	let currentBytes = 0;
 
 	for (const note of notes) {
-		const noteBytes = utf8ByteLength(note.body_md) + OVERHEAD_PER_NOTE_BYTES;
+		const noteBytes = utf8ByteLength(note.body_md) + OVERHEAD_PER_NOTE_BYTES
+			// attachment refs ride in the same JSON body
+			+ utf8ByteLength(JSON.stringify(note.attachments ?? []));
 		const wouldExceedBytes = current.length > 0 && currentBytes + noteBytes > opts.maxBytes;
 		const wouldExceedCount = current.length >= opts.maxNotes;
 		if (wouldExceedBytes || wouldExceedCount) {

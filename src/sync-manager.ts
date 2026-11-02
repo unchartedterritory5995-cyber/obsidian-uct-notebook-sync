@@ -41,7 +41,8 @@
  * it just learned is dead.
  */
 import { buildBatches, DEFAULT_BATCH_OPTIONS, type BatchOptions } from './batching';
-import { sha256Hex } from './hashing';
+import { noteContentHash } from './attachment-refs';
+import { prepareAttachments } from './attachment-sync';
 import { applySyncResult, finalizeManifest, planSync } from './sync-plan';
 import type { PluginData, ScannedFile } from './types';
 import type { Transport } from './api-client';
@@ -60,6 +61,8 @@ export interface VaultSource {
 	readFile(path: string): Promise<string>;
 	/** Resolves once Obsidian has indexed every markdown file, or after `timeoutMs`. */
 	whenMetadataReady(timeoutMs: number): Promise<void>;
+	/** Obsidian has a metadata cache for this note (it has been indexed). */
+	isIndexed(notePath: string): boolean;
 	/** A note's embeds and links as Obsidian's cache records them; `[]` while unindexed. */
 	listRawRefs(notePath: string): RawLinkRef[];
 	/** The vault file a link names, by Obsidian's own resolver, or null. */
@@ -90,6 +93,12 @@ export interface SyncSummary {
 	deletedLocally: string[];
 	manifestSent: boolean;
 	needsReconnect: boolean;
+	/** The server takes attachments (plugin 0.2.0 protocol); false = text-only run. */
+	attachmentsSupported: boolean;
+	/** Blobs uploaded this run. */
+	attachmentsSent: number;
+	/** Images and files that could not come over (listed in Settings). */
+	attachmentIssues: number;
 	error?: string;
 }
 
@@ -112,6 +121,9 @@ export class SyncManager {
 			deletedLocally: [],
 			manifestSent: false,
 			needsReconnect: false,
+			attachmentsSupported: false,
+			attachmentsSent: 0,
+			attachmentIssues: 0,
 			...overrides,
 		});
 
@@ -128,14 +140,39 @@ export class SyncManager {
 
 		const now = (this.deps.now ?? isoNow)();
 		const files = await this.deps.vaultSource.listMarkdownFiles();
+
+		// Phase 0: the images and files the notes use. Only an expired token fails
+		// the run; every other attachment problem is an issue, never a failed sync.
+		const att = await prepareAttachments(
+			{
+				transport: this.deps.transport,
+				vaultSource: this.deps.vaultSource,
+				data,
+				serverUrl: data.serverUrl,
+				token: deviceToken,
+			},
+			files.map((f) => f.path),
+		);
+		if (att.authExpired) {
+			const message = att.failMessage ?? 'Not authenticated';
+			data.deviceToken = null;
+			data.lastSyncError = message;
+			await this.deps.saveData(data);
+			return empty({ needsReconnect: true, error: message });
+		}
+		data.attachmentIssues = att.issues; // replaced each run
+
 		const scanned: ScannedFile[] = [];
 		for (const f of files) {
 			const body = await this.deps.vaultSource.readFile(f.path);
+			const refs = att.refsByNote.get(f.path) ?? null;
 			scanned.push({
 				path: f.path,
-				hash: sha256Hex(body),
+				// With no refs this is exactly 0.1.x's sha256Hex(body).
+				hash: noteContentHash(body, refs),
 				updatedAt: new Date(f.mtime).toISOString(),
 				body,
+				attachments: refs,
 			});
 		}
 
@@ -213,6 +250,9 @@ export class SyncManager {
 			deletedLocally: plan.removedLocally,
 			manifestSent,
 			needsReconnect: false,
+			attachmentsSupported: att.supported,
+			attachmentsSent: att.sent,
+			attachmentIssues: att.issues.length,
 		};
 	}
 }

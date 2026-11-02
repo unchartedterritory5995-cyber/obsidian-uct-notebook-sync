@@ -274,6 +274,9 @@ describe('ObsidianVaultSource.whenMetadataReady', () => {
 			expect(f.offref).toHaveBeenCalledTimes(1);
 			expect(f.listenerCount('resolved')).toBe(0);
 			expect(vs.listRawRefs('b.md')).toEqual([]);
+			expect(vs.isIndexed('b.md')).toBe(false);
+			expect(vs.isIndexed('a.md')).toBe(true);
+			expect(vs.isIndexed('nope.md')).toBe(false);
 		}
 	});
 });
