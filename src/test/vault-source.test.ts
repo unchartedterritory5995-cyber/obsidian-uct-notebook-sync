@@ -186,7 +186,30 @@ describe('ObsidianVaultSource.resolveLink', () => {
 			});
 			const vs = new ObsidianVaultSource(app);
 			expect(vs.resolveLink('y chart #1 (v2).png', SRC)).toBeNull();
-			expect(getFirstLinkpathDest.mock.calls).toEqual([['y chart #1 (v2).png', SRC], ['y chart ', SRC]]);
+			expect(getFirstLinkpathDest.mock.calls).toEqual([['y chart #1 (v2).png', SRC], ['y chart', SRC]]);
+		}
+	});
+
+	it('trims the link text once, for both the full-text and the split lookup (M5)', () => {
+		const png = tfile('att/chart.png');
+		const { app, getFirstLinkpathDest } = fakeApp({ files: [png], caches: {}, dest: () => null });
+		const vs = new ObsidianVaultSource(app);
+		vs.resolveLink('  chart.png  ', SRC);
+		expect(getFirstLinkpathDest.mock.calls).toEqual([['chart.png', SRC]]);
+		getFirstLinkpathDest.mockClear();
+		vs.resolveLink(' chart.png #x ', SRC);
+		expect(getFirstLinkpathDest.mock.calls).toEqual([['chart.png #x', SRC], ['chart.png', SRC]]);
+	});
+
+	it('compares names NFC-normalised in the exact-name guard (M6)', () => {
+		const nfd = 'Ünïcode #1.png'.normalize('NFD');
+		const nfc = 'Ünïcode #1.png'.normalize('NFC');
+		expect(nfd).not.toBe(nfc);
+		const png = tfile(`att/${nfd}`);
+		for (const text of [nfc, `att/${nfc}`]) {
+			const { app, getFirstLinkpathDest } = fakeApp({ files: [png], caches: {}, dest: (lp) => (lp === text ? png : null) });
+			expect(new ObsidianVaultSource(app).resolveLink(text, SRC)?.path).toBe(`att/${nfd}`);
+			expect(getFirstLinkpathDest).toHaveBeenCalledTimes(1);
 		}
 	});
 
@@ -234,6 +257,33 @@ describe('ObsidianVaultSource.whenMetadataReady', () => {
 	});
 });
 
+describe('ObsidianVaultSource.whenMetadataReady after indexing finished (M3)', () => {
+	const a = tfile('a.md');
+	const b = tfile('b.md');
+	const caches: Record<string, FakeCache | null> = { 'a.md': { links: [] }, 'b.md': null };
+
+	it('waits once, then a still-null cache no longer holds up a sync', async () => {
+		const f = fakeApp({ files: [a, b], caches });
+		const vs = new ObsidianVaultSource(f.app);
+		await vs.whenMetadataReady(30); // no event: the first wait ends on its timeout
+		const t0 = Date.now();
+		await vs.whenMetadataReady(60_000); // would hang the test if it waited again
+		expect(Date.now() - t0).toBeLessThan(1000);
+		expect(f.listenerCount('resolved')).toBe(0);
+		expect(vs.listRawRefs('b.md')).toEqual([]);
+	});
+
+	it("after a 'resolved' event, the next sync proceeds at once", async () => {
+		const f = fakeApp({ files: [a, b], caches });
+		const vs = new ObsidianVaultSource(f.app);
+		const p = vs.whenMetadataReady(60_000);
+		f.emit('resolved');
+		await p;
+		await vs.whenMetadataReady(60_000);
+		expect(f.listenerCount('resolved')).toBe(0);
+	});
+});
+
 describe('ObsidianVaultSource.readBinary', () => {
 	it('reads a TFile and refuses anything else', async () => {
 		const buf = new Uint8Array([1, 2, 3]).buffer;
@@ -255,6 +305,12 @@ describe('ObsidianVaultSource.readBinary', () => {
 // fixtures carry made-up hashes. Everything else (which entries become refs, `embed`,
 // the resolved `path`, the `#`-in-a-name and percent-decoded resolution, note links
 // skipped) is this plugin's.
+//
+// Fixture 25's sidecar also carries a ref for `![[chart.png]]`, which sits inside an
+// inline code span. Obsidian's cache never reports a link in code, so production never
+// sends that ref: the cache below leaves it out and NOT_FROM_OBSIDIAN drops it from the
+// expectation. That ref exists to pin the SERVER's code protection, which the server's
+// own tests cover (review M1).
 
 interface Sidecar { vault_paths: string[]; self_path: string; attachments: NoteAttachmentRef[] }
 
@@ -268,7 +324,6 @@ const PARITY: Record<string, FakeCache> = {
 		links: [{ original: '[the report](attachments/q3%20report.pdf)', link: 'attachments/q3%20report.pdf' }],
 	},
 	'25-code-span-link-text': {
-		embeds: [{ original: '![[chart.png]]', link: 'chart.png' }],
 		links: [
 			{ original: '[`q3` deck](attachments/q.pdf)', link: 'attachments/q.pdf' },
 			{ original: '[[q.pdf|the `q3` deck]]', link: 'q.pdf' },
@@ -289,6 +344,8 @@ const PARITY: Record<string, FakeCache> = {
 		],
 	},
 };
+
+const NOT_FROM_OBSIDIAN: Record<string, string[]> = { '25-code-span-link-text': ['![[chart.png]]'] };
 
 describe('server parity fixtures', () => {
 	for (const [name, cache] of Object.entries(PARITY)) {
@@ -314,7 +371,10 @@ describe('server parity fixtures', () => {
 				}
 			}
 			const byOriginal = (a: NoteAttachmentRef, b: NoteAttachmentRef) => (a.original < b.original ? -1 : 1);
-			expect([...refs].sort(byOriginal)).toEqual([...sidecar.attachments].sort(byOriginal));
+			const skip = NOT_FROM_OBSIDIAN[name] ?? [];
+			for (const o of skip) expect(sidecar.attachments.map((r) => r.original)).toContain(o);
+			const expected = sidecar.attachments.filter((r) => !skip.includes(r.original));
+			expect([...refs].sort(byOriginal)).toEqual(expected.sort(byOriginal));
 		});
 	}
 });

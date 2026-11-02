@@ -73,10 +73,33 @@ function extOf(name: string): string {
  * holds a `#` and its own extension is an attachment's (`my chart #1 (v2).png` is a
  * file NAME), else the link with its anchor split off (`x.png#anchor` is `x.png`).
  */
-function unresolvedName(linkpath: string): string {
+function unresolvedWikiName(linkpath: string): string {
 	const whole = linkpath.trim();
 	if (whole.includes('#') && ATTACHMENT_EXTS.has(extOf(basename(whole)))) return whole;
 	return parseLinktext(linkpath).path.trim();
+}
+
+/**
+ * The name an UNRESOLVED markdown link (`[x](dest)`, `![](dest)`) stands for, read as
+ * the server's no-list branch (`providers/obsidian.py::_mark_unsent_attachments.markdown`)
+ * reads a destination: cut at the first `?` or `#`, then percent-decoded ONCE (a
+ * malformed escape keeps the raw text). Backslashes become `/`, so a Windows-written
+ * `att\x.png` names `att/x.png`. ⛔ Never applied to a wikilink: `[[100%25.png]]` names
+ * a file literally called `100%25.png` (review I1, M4).
+ */
+function unresolvedMarkdownName(linkpath: string): string {
+	let name = linkpath.trim().split(/[?#]/, 1)[0] ?? '';
+	try {
+		name = decodeURIComponent(name);
+	} catch {
+		// a malformed escape: keep the text as written
+	}
+	return name.replace(/\\/g, '/').trim();
+}
+
+/** `[[...]]` / `![[...]]` is a wikilink; anything else Obsidian caches is markdown form. */
+function isWikiOriginal(original: string): boolean {
+	return original.startsWith('[[') || original.startsWith('![[');
 }
 
 export function classifyRef(raw: RawLinkRef, dest: ResolvedFile | null): RefClass {
@@ -88,7 +111,7 @@ export function classifyRef(raw: RawLinkRef, dest: ResolvedFile | null): RefClas
 		// a resolved note is a note link, plan A's
 		return dest.extension.toLowerCase() === 'md' ? { kind: 'skip' } : { kind: 'file', file: dest, raw };
 	}
-	const name = unresolvedName(raw.linkpath);
+	const name = isWikiOriginal(raw.original) ? unresolvedWikiName(raw.linkpath) : unresolvedMarkdownName(raw.linkpath);
 	// No extension, `.md`, or a dotted name the server does not read as a file
 	// (`[[Dr.Smith]]`): a note link, which the server keeps as a (pending) link.
 	if (!name || !ATTACHMENT_EXTS.has(extOf(basename(name)))) return { kind: 'skip' };

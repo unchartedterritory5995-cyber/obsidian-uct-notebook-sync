@@ -63,6 +63,29 @@ describe('classifyRef', () => {
 		expect(classifyRef(raw('[[Note#Risk]]', 'Note#Risk', false), null)).toEqual({ kind: 'skip' });
 	});
 
+	it('an unresolved markdown link is named decoded, like the server no-list branch (I1)', () => {
+		const missing = (original: string, linkpath: string) => classifyRef(raw(original, linkpath, false), null);
+		expect(missing('[x](missing%20file.pdf)', 'missing%20file.pdf')).toEqual({
+			kind: 'missing',
+			ref: { original: '[x](missing%20file.pdf)', embed: false, path: 'missing file.pdf', size: 0, sha256: null, status: 'missing' },
+		});
+		// a %23 is a literal # in a NAME, decoded only after the fragment split
+		expect(missing('[c](my%20chart%20%231.png)', 'my%20chart%20%231.png')).toMatchObject({ ref: { path: 'my chart #1.png' } });
+		// a malformed escape keeps the raw text
+		expect(missing('[b](bad%E0%A4%A.pdf)', 'bad%E0%A4%A.pdf')).toMatchObject({ ref: { path: 'bad%E0%A4%A.pdf' } });
+		// a wikilink name is never decoded: `[[100%25.png]]` names `100%25.png`
+		expect(classifyRef(raw('![[100%25.png]]', '100%25.png'), null)).toMatchObject({ ref: { path: '100%25.png' } });
+	});
+
+	it('an unresolved markdown link parses with markdown-link rules (M4)', () => {
+		const md = (original: string, linkpath: string) => classifyRef(raw(original, linkpath), null);
+		expect(md('![](x.png?raw=1)', 'x.png?raw=1')).toMatchObject({ kind: 'missing', ref: { path: 'x.png' } });
+		expect(md('![](doc.pdf#page=2)', 'doc.pdf#page=2')).toMatchObject({ kind: 'missing', ref: { path: 'doc.pdf' } });
+		expect(md('![](att\\x.png)', 'att\\x.png')).toMatchObject({ kind: 'missing', ref: { path: 'att/x.png' } });
+		// a markdown link to a note stays a note link
+		expect(md('[n](Plan?x=1)', 'Plan?x=1')).toEqual({ kind: 'skip' });
+	});
+
 	it('ATTACHMENT_EXTS is the server list', () => {
 		// providers/obsidian.py::_UNSENT_ATTACHMENT_EXTS = _ATT_IMAGE_EXTS | the documents set
 		const server = (

@@ -21,15 +21,25 @@ function toResolved(file: TFile): ResolvedFile {
  * (a folder-qualified link from the vault root) or ends in `/` + the text, or its
  * name equals it. The server's `_ends_at` (`form == want or form.endswith("/" + want)`),
  * the rule `providers/obsidian.py::_resolve_in` and `adapters/obsidian.js::resolveTarget`
- * apply to a target holding `#` (Plan C Task 4 fix round 1, ruling 1).
+ * apply to a target holding `#` (Plan C Task 4 fix round 1, ruling 1). Both sides are
+ * NFC-normalised first: a macOS vault can hold an NFD file name that the member's
+ * link text spells in NFC (review M6).
  */
 function namesExactly(dest: TFile, text: string): boolean {
-	const want = text.toLowerCase();
-	const path = dest.path.toLowerCase();
-	return path === want || path.endsWith('/' + want) || dest.name.toLowerCase() === want;
+	const fold = (s: string): string => s.normalize('NFC').toLowerCase();
+	const want = fold(text);
+	const path = fold(dest.path);
+	return path === want || path.endsWith('/' + want) || fold(dest.name) === want;
 }
 
 export class ObsidianVaultSource implements VaultSource {
+	/** Set once a wait for the metadata cache has ended, by Obsidian's `'resolved'`
+	 * event or by the timeout. From then on a note whose cache is still null is read as
+	 * "no refs" at once: Obsidian does not re-emit `'resolved'` until a file changes,
+	 * so waiting again would cost the full timeout on every sync (review M3). Such a
+	 * note re-pushes once with its refs when it is indexed. */
+	private indexingSettled = false;
+
 	constructor(private readonly app: App) {}
 
 	async listMarkdownFiles(): Promise<VaultFileRef[]> {
@@ -53,12 +63,14 @@ export class ObsidianVaultSource implements VaultSource {
 
 	async whenMetadataReady(timeoutMs: number): Promise<void> {
 		const cache = this.app.metadataCache;
+		if (this.indexingSettled) return;
 		if (this.app.vault.getMarkdownFiles().every((f) => cache.getFileCache(f) !== null)) return;
 		await new Promise<void>((resolve) => {
 			let done = false;
 			const finish = (): void => {
 				if (done) return;
 				done = true;
+				this.indexingSettled = true;
 				clearTimeout(timer);
 				cache.offref(ref);
 				resolve();
@@ -91,12 +103,12 @@ export class ObsidianVaultSource implements VaultSource {
 		// text is asked first, and kept only when it names the file exactly. ⛔ Without
 		// this, that embed asks for `my chart `, finds nothing, and the server shows a
 		// pending note link where the member's image was (Task 4 review I1).
-		if (linkpath.includes('#')) {
-			const whole = linkpath.trim();
-			const hit = cache.getFirstLinkpathDest(whole, sourcePath);
-			if (hit instanceof TFile && namesExactly(hit, whole)) return toResolved(hit);
+		const text = linkpath.trim();
+		if (text.includes('#')) {
+			const hit = cache.getFirstLinkpathDest(text, sourcePath);
+			if (hit instanceof TFile && namesExactly(hit, text)) return toResolved(hit);
 		}
-		const path = parseLinktext(linkpath).path;
+		const path = parseLinktext(text).path.trim();
 		let dest = cache.getFirstLinkpathDest(path, sourcePath);
 		if (dest === null && path.includes('%')) {
 			try {
