@@ -8,6 +8,7 @@
 import { Notice, PluginSettingTab, Setting } from 'obsidian';
 import type { App } from 'obsidian';
 import type UctNotebookSyncPlugin from './main';
+import { validateServerUrl } from './server-url';
 
 export class UctNotebookSyncSettingTab extends PluginSettingTab {
 	private connectCode = '';
@@ -33,19 +34,29 @@ export class UctNotebookSyncSettingTab extends PluginSettingTab {
 				'UCT Intelligence Notebook. Nothing is ever written back to this vault.',
 		});
 
-		new Setting(containerEl)
+		const urlSetting = new Setting(containerEl)
 			.setName('Server URL')
-			.setDesc('Your UCT Intelligence dashboard origin. Leave the default unless a UCT team member told you otherwise.')
-			.addText((text) =>
-				text
-					.setPlaceholder('https://uctintelligence.com')
-					.setValue(data.serverUrl)
-					.onChange(async (value) => {
-						const trimmed = value.trim().replace(/\/+$/, '');
-						data.serverUrl = trimmed || data.serverUrl;
-						await this.plugin.saveData(data);
-					}),
-			);
+			.setDesc('Your UCT Intelligence dashboard origin. Leave the default unless a UCT team member told you otherwise.');
+		// Created once and reused across changes, so the message never stacks.
+		const errorEl = urlSetting.descEl.createDiv({ cls: 'uct-notebook-sync-error' });
+		errorEl.hide();
+		urlSetting.addText((text) =>
+			text
+				.setPlaceholder('https://uctintelligence.com')
+				.setValue(data.serverUrl)
+				.onChange(async (value) => {
+					const result = validateServerUrl(value);
+					if (!result.ok) {
+						errorEl.setText(result.message);
+						errorEl.show();
+						return;
+					}
+					errorEl.setText('');
+					errorEl.hide();
+					data.serverUrl = result.url;
+					await this.plugin.saveData(data);
+				}),
+		);
 
 		if (data.deviceToken) {
 			this.renderConnected(containerEl);

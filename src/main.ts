@@ -9,6 +9,7 @@
  */
 import { Notice, Plugin } from 'obsidian';
 import { ObsidianHttpTransport, type RedeemOutcome } from './api-client';
+import { validateServerUrl } from './server-url';
 import { UctNotebookSyncSettingTab } from './settings';
 import { SyncManager, type SyncSummary } from './sync-manager';
 import { defaultPluginData, type PluginData, clearStagedState} from './types';
@@ -62,6 +63,10 @@ export default class UctNotebookSyncPlugin extends Plugin {
 	}
 
 	async redeemConnectCode(code: string): Promise<RedeemOutcome> {
+		const urlCheck = validateServerUrl(this.data.serverUrl);
+		if (!urlCheck.ok) {
+			return { ok: false, status: 0, message: `Server URL is not valid: ${urlCheck.message}` };
+		}
 		const label = this.app.vault.getName();
 		const result = await this.transport.redeem({
 			serverUrl: this.data.serverUrl,
@@ -100,6 +105,23 @@ export default class UctNotebookSyncPlugin extends Plugin {
 				manifestSent: false,
 				needsReconnect: false,
 				error: 'A sync is already running.',
+			};
+		}
+		const urlCheck = validateServerUrl(this.data.serverUrl);
+		if (!urlCheck.ok) {
+			const error = `Server URL is not valid: ${urlCheck.message}`;
+			new Notice(error);
+			return {
+				ok: false,
+				scanned: 0,
+				pushed: 0,
+				skippedUnchanged: 0,
+				tooLarge: [],
+				skippedTooLargeUnchanged: [],
+				deletedLocally: [],
+				manifestSent: false,
+				needsReconnect: false,
+				error,
 			};
 		}
 		this.syncing = true;
