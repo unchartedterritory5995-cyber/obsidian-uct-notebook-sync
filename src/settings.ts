@@ -36,6 +36,8 @@ const ATTACHMENT_REASON_TEXT: Record<AttachmentIssue['reason'], string> = {
 	'too-many-files': 'more than 5000 images and files in one note; the rest were not sent',
 	'note-too-large-for-files': 'note too large to send with its images and files; they were not sent',
 	'server-busy': 'UCT is busy and is not taking images and files right now; will keep retrying',
+	'waiting-for-index': 'waiting for Obsidian to index this note; its changes will sync once it has',
+	'pushed-without-files': 'pushed without its images and files; Obsidian has not indexed it yet',
 };
 
 export class UctNotebookSyncSettingTab extends PluginSettingTab {

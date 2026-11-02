@@ -103,7 +103,7 @@ export interface AttachmentIssue {
 	/** `link-too-long`: the ref is over the server's `original`/`path` bounds and cannot
 	 * be sent. `too-many-files`: a note past the 5000-ref cap (one issue per note). */
 	reason: 'too-large' | 'missing' | 'storage-limit' | 'upload-failed' | 'link-too-long' | 'too-many-files'
-		| 'note-too-large-for-files' | 'server-busy';
+		| 'note-too-large-for-files' | 'server-busy' | 'waiting-for-index' | 'pushed-without-files';
 	size: number;
 	/** The server's own sentence, when one failure stands for the whole run (a 403). */
 	message?: string;
@@ -129,6 +129,11 @@ export interface FileState {
 	 * has not indexed such a note, it is deferred rather than pushed without its list
 	 * (which the server would read as "no list": notices, and its blobs GC'd). */
 	hadRefs?: boolean;
+	/** Consecutive runs this note was deferred while unindexed (absent = none). */
+	deferredRuns?: number;
+	/** Pushed without its list after too many deferrals; Settings says so until a push
+	 * with a list replaces this state. */
+	listlessPush?: boolean;
 }
 
 /** Everything persisted via Obsidian's `Plugin.loadData()`/`saveData()`

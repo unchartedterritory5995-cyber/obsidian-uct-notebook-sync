@@ -145,7 +145,7 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 			// signal, so it is never dropped silently (review I1).
 			const refPath = c.kind === 'missing' ? c.ref.path : c.file.path;
 			if (codePoints(raw.original) > MAX_ORIGINAL_CHARS) {
-				addIssue({ path: raw.linkpath, reason: 'link-too-long', size: 0 });
+				addIssue({ path: raw.linkpath || raw.original, reason: 'link-too-long', size: 0 });
 				continue;
 			}
 			if (codePoints(refPath) > MAX_PATH_CHARS) {

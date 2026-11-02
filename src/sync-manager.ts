@@ -41,8 +41,12 @@
  * it just learned is dead.
  */
 import {
-	buildBatches, DEFAULT_BATCH_OPTIONS, MAX_INGEST_BYTES, singleNoteRequestBytes, type BatchOptions,
+	buildBatches, DEFAULT_BATCH_OPTIONS, exceedsIngestCap, type BatchOptions,
 } from './batching';
+
+/** Runs an unindexed note that last carried refs is deferred before its text is pushed
+ * without the list (review N1). */
+export const MAX_DEFERRED_RUNS = 3;
 import { noteContentHash } from './attachment-refs';
 import { prepareAttachments } from './attachment-sync';
 import { applySyncResult, finalizeManifest, planSync } from './sync-plan';
@@ -168,6 +172,10 @@ export class SyncManager {
 		data.attachmentIssues = [...att.issues]; // replaced each run
 
 		const scanned: ScannedFile[] = [];
+		/** Deferred this run -> its consecutive deferred-run count. */
+		const deferred = new Map<string, number>();
+		/** Pushed without its list after MAX_DEFERRED_RUNS deferrals. */
+		const pushedBare = new Set<string>();
 		for (const f of files) {
 			const body = await this.deps.vaultSource.readFile(f.path);
 			let refs = att.refsByNote.get(f.path) ?? null;
@@ -176,11 +184,25 @@ export class SyncManager {
 			// list: DEFER it. Pushed list-less, the server would store NULL for it, show
 			// its images and files as unavailable and GC their blobs until the next run.
 			// Keeping the prior hash leaves it unchanged (and still manifested) this run;
-			// it pushes, with its list, once Obsidian has indexed it.
+			// it pushes, with its list, once Obsidian has indexed it. The deferral is
+			// visible from its first run and BOUNDED (review N1): after
+			// MAX_DEFERRED_RUNS in a row the text goes out without the list, and the
+			// list follows on the first indexed run. The count lives in `data.files`,
+			// so it survives a restart.
 			const prior = data.files[f.path];
-			if (att.supported && refs === null && prior?.hadRefs && !prior.tooLarge) {
-				scanned.push({ path: f.path, hash: prior.hash, updatedAt, body, attachments: null });
-				continue;
+			const unindexed = att.supported && refs === null;
+			if (unindexed && prior?.hadRefs && !prior.tooLarge) {
+				const runs = (prior.deferredRuns ?? 0) + 1;
+				if (runs <= MAX_DEFERRED_RUNS) {
+					deferred.set(f.path, runs);
+					data.attachmentIssues.push({ path: f.path, reason: 'waiting-for-index', size: 0 });
+					scanned.push({ path: f.path, hash: prior.hash, updatedAt, body, attachments: null });
+					continue;
+				}
+				pushedBare.add(f.path);
+				data.attachmentIssues.push({ path: f.path, reason: 'pushed-without-files', size: 0 });
+			} else if (unindexed && prior?.listlessPush) {
+				data.attachmentIssues.push({ path: f.path, reason: 'pushed-without-files', size: 0 });
 			}
 			// A note over the batch budget already goes alone. If its refs would take even
 			// that single request past the server's 2 MB cap, the server would refuse the
@@ -190,8 +212,7 @@ export class SyncManager {
 			if (refs !== null && refs.length > 0) {
 				const bare: NoteInput = { vault_path: f.path, content_hash: '0'.repeat(64), body_md: body, updated_at: updatedAt };
 				// (a body over the cap on its own is not sent at all; see below)
-				if (singleNoteRequestBytes(bare) <= MAX_INGEST_BYTES
-					&& singleNoteRequestBytes({ ...bare, attachments: refs }) > MAX_INGEST_BYTES) {
+				if (!exceedsIngestCap(bare) && exceedsIngestCap({ ...bare, attachments: refs })) {
 					refs = null;
 					data.attachmentIssues.push({ path: f.path, reason: 'note-too-large-for-files', size: 0 });
 				}
@@ -215,10 +236,12 @@ export class SyncManager {
 		// only once its content changes (sync-plan's tooLarge rule).
 		const sendable: NoteInput[] = [];
 		for (const note of plan.toPush) {
-			if (singleNoteRequestBytes(note) > MAX_INGEST_BYTES) tooLargeThisRun.add(note.vault_path);
+			if (exceedsIngestCap(note)) tooLargeThisRun.add(note.vault_path);
 			else sendable.push(note);
 		}
 		plan.toPush = sendable;
+		// Counted under `tooLarge`, never as "unchanged" (review N3).
+		const notSentTooLarge = tooLargeThisRun.size;
 		const batches = buildBatches(plan.toPush, this.deps.batchOptions ?? DEFAULT_BATCH_OPTIONS);
 
 		let pushed = 0;
@@ -234,7 +257,7 @@ export class SyncManager {
 			return empty({
 				scanned: scanned.length,
 				pushed,
-				skippedUnchanged: scanned.length - plan.toPush.length,
+				skippedUnchanged: scanned.length - plan.toPush.length - notSentTooLarge,
 				tooLarge: [...tooLargeThisRun],
 				skippedTooLargeUnchanged: plan.skippedTooLarge,
 				deletedLocally: plan.removedLocally,
@@ -277,6 +300,17 @@ export class SyncManager {
 
 		const pushedPaths = new Set(plan.toPush.map((n) => n.vault_path));
 		data.files = applySyncResult(data.files, scanned, pushedPaths, tooLargeThisRun, now);
+		// N1 bookkeeping: a deferred note keeps its prior state plus the run count; a note
+		// pushed without its list is marked so Settings keeps saying so until it is pushed
+		// with one. A normal push writes a fresh state, which resets both.
+		for (const [path, runs] of deferred) {
+			const state = data.files[path];
+			if (state) state.deferredRuns = runs;
+		}
+		for (const path of pushedBare) {
+			const state = data.files[path];
+			if (state && pushedPaths.has(path)) state.listlessPush = true;
+		}
 		data.lastSyncAt = now;
 		data.lastSyncError = null;
 		await this.deps.saveData(data);
@@ -285,7 +319,7 @@ export class SyncManager {
 			ok: true,
 			scanned: scanned.length,
 			pushed,
-			skippedUnchanged: scanned.length - plan.toPush.length,
+			skippedUnchanged: scanned.length - plan.toPush.length - notSentTooLarge,
 			tooLarge: [...tooLargeThisRun],
 			skippedTooLargeUnchanged: plan.skippedTooLarge,
 			deletedLocally: plan.removedLocally,

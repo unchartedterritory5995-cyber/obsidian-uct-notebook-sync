@@ -544,6 +544,44 @@ describe('SyncManager.runSync with attachments', () => {
 		expect(t.pushedNotes()).toEqual([]);
 	});
 
+	it('a deferral is visible and bounded: after 3 deferred runs the text goes out without its list (N1)', async () => {
+		const t = new FakeServer();
+		const vault = new FakeVault().note('a.md', '![[chart.png]]', [embed('chart.png')]).file('att/chart.png', B);
+		await mgr(t, vault).runSync();
+		vault.notes['a.md'] = '![[chart.png]] edited';
+		vault.refs['a.md'] = null;
+		const waiting = { path: 'a.md', reason: 'waiting-for-index', size: 0 };
+		const pushedBare = { path: 'a.md', reason: 'pushed-without-files', size: 0 };
+
+		for (let run = 1; run <= 3; run++) {
+			t.reset();
+			// a fresh manager each run: the counter survives a restart (it lives in saved data)
+			const s = await mgr(t, vault).runSync();
+			expect(s.ok).toBe(true);
+			expect(t.pushedNotes()).toEqual([]);
+			expect(store.attachmentIssues).toContainEqual(waiting);
+			expect(store.files['a.md']!.deferredRuns).toBe(run);
+		}
+		// the 4th run pushes the text without the list, and says so
+		t.reset();
+		await mgr(t, vault).runSync();
+		expect(t.pushedNotes().map((n) => [n.body_md, 'attachments' in n])).toEqual([['![[chart.png]] edited', false]]);
+		expect(store.attachmentIssues).toContainEqual(pushedBare);
+		expect(store.attachmentIssues).not.toContainEqual(waiting);
+		// still unindexed: nothing re-pushed, the issue stays
+		t.reset();
+		await mgr(t, vault).runSync();
+		expect(t.pushedNotes()).toEqual([]);
+		expect(store.attachmentIssues).toContainEqual(pushedBare);
+		// indexed: pushed with its list, issue gone, counter reset
+		vault.refs['a.md'] = [embed('chart.png')];
+		t.reset();
+		await mgr(t, vault).runSync();
+		expect(t.pushedNotes()[0]!.attachments).toHaveLength(1);
+		expect(store.attachmentIssues).toEqual([]);
+		expect(store.files['a.md']!.deferredRuns).toBeUndefined();
+	});
+
 	it('too-large, missing and storage-limit refs are sent with their status and never uploaded', async () => {
 		const t = new FakeServer();
 		t.maxBytes = 4;
@@ -700,6 +738,7 @@ describe('SyncManager.runSync with attachments', () => {
 		expect(s1.ok).toBe(true);
 		expect(t.pushedNotes().map((n) => n.vault_path)).toEqual(['a.md']);
 		expect(s1.tooLarge).toEqual(['huge.md']);
+		expect(s1.skippedUnchanged).toBe(0); // N3: counted as too large, never as "unchanged"
 		expect(store.files['huge.md']).toMatchObject({ tooLarge: true }); // listed in Settings
 		const final1 = t.ingestCalls.find((c) => c.final === true)!;
 		expect(final1.manifest).toEqual(['a.md']); // never staged, so never manifested

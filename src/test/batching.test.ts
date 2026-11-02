@@ -1,5 +1,7 @@
-import { describe, expect, it } from 'vitest';
-import { buildBatches, type BatchOptions } from '../batching';
+import { describe, expect, it, vi } from 'vitest';
+import {
+	buildBatches, exceedsIngestCap, MAX_INGEST_BYTES, singleNoteRequestBytes, type BatchOptions,
+} from '../batching';
 import type { NoteInput } from '../types';
 
 function note(path: string, bodyLen = 10): NoteInput {
@@ -10,6 +12,39 @@ function note(path: string, bodyLen = 10): NoteInput {
 		updated_at: '2026-09-02T00:00:00.000Z',
 	};
 }
+
+describe('exceedsIngestCap (N2)', () => {
+	it('decides a small note without serializing it', () => {
+		const spy = vi.spyOn(JSON, 'stringify');
+		expect(exceedsIngestCap(note('a.md', 1000))).toBe(false);
+		expect(spy).not.toHaveBeenCalled();
+		spy.mockRestore();
+	});
+
+	it('stays exact near the cap, where an estimate would be wrong both ways', () => {
+		// 1,000,001 quotes: about 1 MB of characters but over 2 MB once JSON-escaped
+		const quotes = { ...note('q.md'), body_md: '"'.repeat(1_000_001) };
+		expect(exceedsIngestCap(quotes)).toBe(true);
+		expect(singleNoteRequestBytes(quotes)).toBeGreaterThan(MAX_INGEST_BYTES);
+		// 1.9 MB of plain text is under
+		const plain = { ...note('p.md'), body_md: 'x'.repeat(1_900_000) };
+		expect(exceedsIngestCap(plain)).toBe(false);
+		// a body whose length alone is over the cap is over without serializing
+		const spy = vi.spyOn(JSON, 'stringify');
+		expect(exceedsIngestCap({ ...note('h.md'), body_md: 'x'.repeat(2_000_001) })).toBe(true);
+		expect(spy).not.toHaveBeenCalled();
+		spy.mockRestore();
+	});
+
+	it('counts the attachment list', () => {
+		const ref = {
+			original: '![[a.png]]', embed: true, path: 'att/a.png', size: 1, sha256: 'a'.repeat(64), status: 'ok' as const,
+		};
+		const n = { ...note('r.md'), body_md: 'x'.repeat(1_990_000), attachments: Array(200).fill(ref) };
+		expect(exceedsIngestCap(n)).toBe(singleNoteRequestBytes(n) > MAX_INGEST_BYTES);
+		expect(exceedsIngestCap(n)).toBe(true);
+	});
+});
 
 describe('buildBatches', () => {
 	it('counts attachment refs toward the batch byte budget', () => {

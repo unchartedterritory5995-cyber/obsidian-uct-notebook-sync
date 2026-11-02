@@ -345,6 +345,17 @@ describe('prepareAttachments', () => {
 			{ path: longName, reason: 'link-too-long', size: 0 },
 		]);
 
+		// an empty link path is never an attachment (classifyRef skips it before any cap
+		// check), so it is neither sent nor reported; the issue's `linkpath || original`
+		// fallback is a guard only
+		const blank = new FakeVault().note('b.md', 'x', [
+			{ original: `![${'b'.repeat(2050)}](x.png)`, linkpath: '', embed: true },
+		]);
+		blank.resolveRef = () => ({ path: 'att/x.png', extension: 'png', size: 1, mtime: 1 });
+		const r4 = await run(new FakeServer(), blank);
+		expect(r4.issues).toEqual([]);
+		expect(r4.refsByNote.get('b.md')).toEqual([]);
+
 		const many = new FakeVault();
 		const refs = [];
 		for (let i = 0; i < 5003; i++) refs.push(embed(`m${i}.png`));
