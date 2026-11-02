@@ -158,6 +158,10 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 			const base = { original: raw.original, embed: raw.embed, path: file.path, size: file.size };
 			if (!data.syncAttachments) {
 				refs.push({ ...base, sha256: null, status: 'off' });
+				// Keep a referenced file's cache entry while sync is off, so turning it
+				// back on does not re-read every binary (review M2).
+				const kept = data.attachmentHashes[file.path];
+				if (kept) hashes[file.path] = kept;
 				continue;
 			}
 			if (file.size > maxBytes) {

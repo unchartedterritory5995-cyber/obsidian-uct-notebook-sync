@@ -286,6 +286,24 @@ describe('prepareAttachments', () => {
 		for (const u of server.uploadCalls) expect(shaOf(new Uint8Array(u.data))).toBe(u.sha256);
 	});
 
+	it('turning sync off keeps the hash cache, so turning it back on re-reads nothing (M2)', async () => {
+		const server = new FakeServer();
+		const vault = new FakeVault().note('a.md', 'x', [embed('a.png')]).file('att/a.png', A, 3);
+		const d = data();
+		await run(server, vault, d);
+		const entry = d.attachmentHashes['att/a.png'];
+		expect(entry).toBeDefined();
+
+		d.syncAttachments = false;
+		await run(server, vault, d);
+		expect(d.attachmentHashes['att/a.png']).toEqual(entry);
+
+		d.syncAttachments = true;
+		vault.readBinaryCalls = [];
+		await run(server, vault, d);
+		expect(vault.readBinaryCalls).toEqual([]);
+	});
+
 	it('enforces the server caps: original <= 2048, path <= 1024 code points, <= 5000 refs a note', async () => {
 		const server = new FakeServer();
 		const longName = `${'x'.repeat(1030)}.png`;
