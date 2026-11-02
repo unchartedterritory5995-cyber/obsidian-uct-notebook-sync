@@ -11,7 +11,7 @@ import { vi } from 'vitest';
 export const requestUrl = vi.fn();
 
 /** Test stand-in for Obsidian's own `TFile`; production uses the real one. */
-export class TFile { path = ''; extension = ''; basename = ''; stat = { mtime: 0, size: 0, ctime: 0 }; }
+export class TFile { path = ''; name = ''; extension = ''; basename = ''; stat = { mtime: 0, size: 0, ctime: 0 }; }
 
 /** Test stand-in for Obsidian's own `parseLinktext`; production uses the real one. */
 export function parseLinktext(linktext: string) { const i = linktext.indexOf('#'); return i < 0 ? { path: linktext, subpath: '' } : { path: linktext.slice(0, i), subpath: linktext.slice(i) }; }
@@ -37,7 +37,10 @@ export class Plugin {
 			getAbstractFileByPath: () => null,
 			cachedRead: async () => '',
 		},
-		metadataCache: {},
+		metadataCache: {
+			getFileCache: () => null,
+			getFirstLinkpathDest: () => null,
+		},
 	};
 	manifest: any = { id: 'uct-notebook-sync' };
 	stored: unknown = null;

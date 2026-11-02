@@ -45,6 +45,7 @@ import { sha256Hex } from './hashing';
 import { applySyncResult, finalizeManifest, planSync } from './sync-plan';
 import type { PluginData, ScannedFile } from './types';
 import type { Transport } from './api-client';
+import type { RawLinkRef, ResolvedFile } from './attachment-refs';
 
 export interface VaultFileRef {
 	path: string;
@@ -57,6 +58,13 @@ export interface VaultFileRef {
 export interface VaultSource {
 	listMarkdownFiles(): Promise<VaultFileRef[]>;
 	readFile(path: string): Promise<string>;
+	/** Resolves once Obsidian has indexed every markdown file, or after `timeoutMs`. */
+	whenMetadataReady(timeoutMs: number): Promise<void>;
+	/** A note's embeds and links as Obsidian's cache records them; `[]` while unindexed. */
+	listRawRefs(notePath: string): RawLinkRef[];
+	/** The vault file a link names, by Obsidian's own resolver, or null. */
+	resolveLink(linkpath: string, sourcePath: string): ResolvedFile | null;
+	readBinary(path: string): Promise<ArrayBuffer>;
 }
 
 export interface SyncManagerDeps {

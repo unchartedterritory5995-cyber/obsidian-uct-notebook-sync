@@ -23,6 +23,27 @@ export interface NoteInput {
 	 * `received_at` instead) — see sync-manager.ts's module docstring. Send
 	 * it honestly anyway; it is still used for display/conflict purposes. */
 	updated_at: string;
+	/** The note's attachment refs (plugin 0.2.0). Omitted, never `[]`-for-unknown,
+	 * when the plugin sends no list (an older server, or legacy mode): the server
+	 * reads an absent list as "this plugin sent none". */
+	attachments?: NoteAttachmentRef[];
+}
+
+/** A ref's status, as `ObsidianAttachmentRef.status` in api/routers/note_sync.py. */
+export type AttachmentStatus = 'ok' | 'too-large' | 'missing' | 'off' | 'storage-limit';
+
+/** One attachment a note uses, resolved with Obsidian's own resolver. Mirrors
+ * `ObsidianAttachmentRef` in api/routers/note_sync.py: `original` is an exact
+ * substring of the note (1..2048 chars), `path` the resolved vault path, or for
+ * `missing` the name as written (1..1024), and `sha256` is set exactly when
+ * `status` is `ok` or `storage-limit`. */
+export interface NoteAttachmentRef {
+	original: string;
+	embed: boolean;
+	path: string;
+	size: number;
+	sha256: string | null;
+	status: AttachmentStatus;
 }
 
 /** Body of `POST /obsidian/ingest`. `consent` is always `true` here — the
