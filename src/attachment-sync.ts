@@ -63,14 +63,31 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 	});
 
 	// 1. Does this server speak attachments, and what are its limits?
+	// ⛔ Only the server SAYING "no attachments" (404/405, a non-protocol 2xx) means
+	// legacy. A transient failure (403, 429, 5xx, network) keeps the last run's answer:
+	// flipping a supported vault to legacy for one run would re-push every attachment
+	// note without its list, show "unavailable" notices across the notebook, let the
+	// final push GC its blobs, and re-push and re-upload it all the run after (review
+	// I2). So an "offline" run builds the same refs from the vault and the hash cache,
+	// keeping every hash stable, and uploads nothing: the server shows "retrying".
 	const probe = await transport.checkAttachments({ serverUrl, token, sha256: [] });
+	let offline = false;
+	let maxBytes: number;
+	let remainingBytes: number;
 	if (!probe.ok) {
 		if (probe.authExpired) return { ...legacy(), authExpired: true, failMessage: probe.message };
+		if (data.attachmentServer === null) return legacy();
+		offline = true;
+		maxBytes = data.attachmentServer.maxBytes;
+		remainingBytes = Number.POSITIVE_INFINITY;
+	} else if (!probe.supported) {
+		data.attachmentServer = null;
 		return legacy();
+	} else {
+		data.attachmentServer = { maxBytes: probe.maxBytes };
+		maxBytes = probe.maxBytes;
+		remainingBytes = probe.remainingBytes;
 	}
-	if (!probe.supported) return legacy();
-	const maxBytes = probe.maxBytes;
-	let remainingBytes = probe.remainingBytes;
 
 	// 2. Obsidian's link index.
 	await vaultSource.whenMetadataReady(METADATA_WAIT_MS);
@@ -162,6 +179,7 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 	data.attachmentHashes = hashes;
 
 	const result: PrepareResult = { supported: true, refsByNote, sent: 0, issues, authExpired: false };
+	if (offline) return result;
 	const allRefs = (): NoteAttachmentRef[] => [...refsByNote.values()].flatMap((r) => r ?? []);
 	const markStorageLimit = (sha: string): void => {
 		for (const r of allRefs()) {

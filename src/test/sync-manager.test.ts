@@ -581,6 +581,24 @@ describe('SyncManager.runSync with attachments', () => {
 		expect(t2.ingestCalls).toEqual([]);
 	});
 
+	it('a transient probe failure after a good run re-pushes nothing (no flip to a list-less push)', async () => {
+		const t = new FakeServer();
+		const vault = new FakeVault()
+			.note('a.md', '![[chart.png]]', [embed('chart.png')])
+			.note('b.md', '# plain', [])
+			.file('att/chart.png', B);
+		const m = mgr(t, vault);
+		await m.runSync();
+		expect(t.pushedNotes()).toHaveLength(2);
+
+		t.reset();
+		t.checkScript = [{ ok: false, status: 503, message: 'Service Unavailable', authExpired: false }];
+		const s = await m.runSync();
+		expect(s.ok).toBe(true);
+		expect(t.pushedNotes()).toEqual([]);
+		expect(t.uploadCalls).toEqual([]);
+	});
+
 	it('a 403 on upload stops uploads but the notes are still pushed', async () => {
 		const t = new FakeServer();
 		t.uploadScript = [uploadFailure(403, 'Upgrade required')];

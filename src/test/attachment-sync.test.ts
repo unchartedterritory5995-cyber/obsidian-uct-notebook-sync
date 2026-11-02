@@ -44,6 +44,36 @@ describe('prepareAttachments', () => {
 		expect(await run(revoked, vault)).toMatchObject({ authExpired: true, failMessage: 'Not authenticated' });
 	});
 
+	it('only a missing route or protocol means legacy; a transient probe failure keeps the last support state (I2)', async () => {
+		const vault = new FakeVault().note('a.md', '![[a.png]]', [embed('a.png')]).file('att/a.png', A);
+		const d = data();
+		await run(new FakeServer(), vault, d);
+		expect(d.attachmentServer).toEqual({ maxBytes: 26_214_400 });
+
+		for (const status of [403, 429, 500, 502, 503, 0]) {
+			const server = new FakeServer();
+			server.checkScript = [{ ok: false, status, message: 'down', authExpired: false }];
+			const r = await run(server, vault, d);
+			expect(r.supported).toBe(true);
+			expect(r.refsByNote.get('a.md')).toEqual([
+				{ original: '![[a.png]]', embed: true, path: 'att/a.png', size: A.byteLength, sha256: shaOf(A), status: 'ok' },
+			]);
+			expect(server.checkCalls).toEqual([[]]); // nothing checked or uploaded this run
+			expect(server.uploadCalls).toEqual([]);
+			expect(d.attachmentServer).toEqual({ maxBytes: 26_214_400 });
+		}
+
+		// a missing route is the server saying "no attachments": legacy, and remembered
+		const old = new FakeServer();
+		old.supported = false;
+		expect((await run(old, vault, d)).refsByNote.get('a.md')).toBeNull();
+		expect(d.attachmentServer).toBeNull();
+		// ...so a transient failure after that is legacy too
+		const flaky = new FakeServer();
+		flaky.checkScript = [{ ok: false, status: 502, message: 'Bad Gateway', authExpired: false }];
+		expect((await run(flaky, vault, d)).refsByNote.get('a.md')).toBeNull();
+	});
+
 	it('waits for the metadata cache, and a still-unindexed note gets null (attachments omitted), not []', async () => {
 		const server = new FakeServer();
 		const vault = new FakeVault()

@@ -155,6 +155,10 @@ export interface PluginData {
 	attachmentIssues: AttachmentIssue[];
 	/** The one-time "now also sends images and files" notice was shown. */
 	attachmentsNoticeShown: boolean;
+	/** The last answer the server gave about attachments: its limits when it takes them,
+	 * `null` when it said it does not (or never answered). A transient probe failure
+	 * keeps this, so a supported vault never flips to legacy for one run. */
+	attachmentServer: { maxBytes: number } | null;
 }
 
 /**
@@ -196,5 +200,6 @@ export function defaultPluginData(vaultId: string): PluginData {
 		attachmentHashes: {},
 		attachmentIssues: [],
 		attachmentsNoticeShown: false,
+		attachmentServer: null,
 	};
 }
