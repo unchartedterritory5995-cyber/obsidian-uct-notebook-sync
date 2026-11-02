@@ -74,6 +74,42 @@ describe('prepareAttachments', () => {
 		expect((await run(flaky, vault, d)).refsByNote.get('a.md')).toBeNull();
 	});
 
+	it('stops uploading at the per-run time or byte budget; the next run continues (I3)', async () => {
+		const vault = new FakeVault();
+		const refs = [];
+		for (let i = 0; i < 5; i++) {
+			vault.file(`att/f${i}.png`, bytes(`${i}`));
+			refs.push(embed(`f${i}.png`));
+		}
+		vault.note('a.md', 'x', refs);
+
+		// time: 20 s an upload against a 60 s budget -> 3 this run, 2 the next
+		let now = 0;
+		const server = new FakeServer();
+		server.onUpload = () => { now += 20_000; };
+		const timed = () => prepareAttachments(
+			{ transport: server, vaultSource: vault, data: d, serverUrl: 'https://x.test', token: 't', clock: () => now },
+			['a.md'],
+		);
+		const d = data();
+		const r1 = await timed();
+		expect(server.uploadCalls).toHaveLength(3);
+		expect(r1.issues).toEqual([]);
+		expect(r1.refsByNote.get('a.md')!.every((r) => r.status === 'ok')).toBe(true);
+		server.reset();
+		await timed();
+		expect(server.uploadCalls).toHaveLength(2);
+
+		// bytes: a 2-byte budget with 1-byte blobs -> 2 a run
+		const s2 = new FakeServer();
+		const r = await prepareAttachments(
+			{ transport: s2, vaultSource: vault, data: data(), serverUrl: 'https://x.test', token: 't', uploadBudget: { ms: 1e12, bytes: 2 } },
+			['a.md'],
+		);
+		expect(s2.uploadCalls).toHaveLength(2);
+		expect(r.sent).toBe(2);
+	});
+
 	it('waits for the metadata cache, and a still-unindexed note gets null (attachments omitted), not []', async () => {
 		const server = new FakeServer();
 		const vault = new FakeVault()

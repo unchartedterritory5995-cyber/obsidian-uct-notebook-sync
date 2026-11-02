@@ -119,8 +119,12 @@ export class FakeServer implements Transport {
 		};
 	}
 
+	/** Called on every upload, e.g. to advance a fake clock. */
+	onUpload: () => void = () => {};
+
 	async uploadAttachment(p: UploadParams): Promise<UploadOutcome> {
 		this.uploadCalls.push(p);
+		this.onUpload();
 		const s = this.uploadScript.shift();
 		if (s) return s;
 		const stored = !this.stored.has(p.sha256);

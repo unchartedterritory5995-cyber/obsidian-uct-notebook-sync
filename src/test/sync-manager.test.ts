@@ -599,6 +599,39 @@ describe('SyncManager.runSync with attachments', () => {
 		expect(t.uploadCalls).toEqual([]);
 	});
 
+	it('pushes the note text once the upload budget is spent; later runs finish the uploads (I3)', async () => {
+		const t = new FakeServer();
+		const vault = new FakeVault();
+		const refs = [];
+		for (let i = 0; i < 4; i++) {
+			vault.file(`att/f${i}.png`, bytes(`blob ${i}`));
+			refs.push(embed(`f${i}.png`));
+		}
+		vault.note('a.md', 'images', refs);
+		let now = 0;
+		t.onUpload = () => { now += 30_000; };
+		const m = new SyncManager({
+			transport: t, vaultSource: vault, getData: () => store,
+			saveData: async (d) => { store = JSON.parse(JSON.stringify(d)) as PluginData; },
+			clock: () => now,
+		});
+		const s1 = await m.runSync();
+		expect(s1.ok).toBe(true);
+		expect(t.uploadCalls).toHaveLength(2); // 60 s budget at 30 s each
+		expect(t.pushedNotes().map((n) => n.vault_path)).toEqual(['a.md']); // text went out
+		expect(t.pushedNotes()[0]!.attachments!.every((r) => r.status === 'ok')).toBe(true);
+
+		t.reset();
+		const s2 = await m.runSync();
+		expect(t.uploadCalls).toHaveLength(2);
+		expect(t.pushedNotes()).toEqual([]); // the note did not change
+		expect(s2.attachmentsSent).toBe(2);
+
+		t.reset();
+		await m.runSync();
+		expect(t.uploadCalls).toEqual([]);
+	});
+
 	it('a 403 on upload stops uploads but the notes are still pushed', async () => {
 		const t = new FakeServer();
 		t.uploadScript = [uploadFailure(403, 'Upgrade required')];

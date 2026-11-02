@@ -29,12 +29,25 @@ export const MAX_PATH_CHARS = 1024;
 /** `_MAX_ATTACHMENTS_PER_NOTE`: refs past this are not sent. */
 export const MAX_REFS_PER_NOTE = 5000;
 
+/**
+ * A run uploads for at most this long, or this many bytes, then the note text goes
+ * out; the rest of the blobs upload on later runs (review I3). Their refs stay `ok`:
+ * the server shows "retrying" and re-lists each note once its blob arrives
+ * (`_media_retry_rows`), so the first 0.2.0 sync of a large vault pushes its text in
+ * about a minute instead of after every upload.
+ */
+export const UPLOAD_BUDGET_MS = 60_000;
+export const UPLOAD_BUDGET_BYTES = 100 * 1024 * 1024;
+
 export interface PrepareDeps {
 	transport: Transport;
 	vaultSource: VaultSource;
 	data: PluginData;
 	serverUrl: string;
 	token: string;
+	/** Milliseconds; injectable for tests. Default `Date.now`. */
+	clock?: () => number;
+	uploadBudget?: { ms: number; bytes: number };
 }
 
 export interface PrepareResult {
@@ -209,8 +222,14 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 		remainingBytes = out.remainingBytes;
 	}
 
-	// 5. Upload each missing blob once, in order, from the first path that has it.
+	// 5. Upload each missing blob once, in order, from the first path that has it,
+	// within this run's budget.
+	const clock = deps.clock ?? Date.now;
+	const budget = deps.uploadBudget ?? { ms: UPLOAD_BUDGET_MS, bytes: UPLOAD_BUDGET_BYTES };
+	const started = clock();
+	let sentBytes = 0;
 	for (let i = 0; i < missing.length; i++) {
+		if (clock() - started >= budget.ms || sentBytes >= budget.bytes) break; // later runs go on
 		const sha = missing[i]!;
 		const f = firstFile.get(sha);
 		if (!f) continue;
@@ -231,6 +250,7 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 		if (up.ok) {
 			result.sent += 1;
 			remainingBytes -= f.size;
+			sentBytes += f.size;
 			continue;
 		}
 		if (up.authExpired) return { ...result, authExpired: true, failMessage: up.message };

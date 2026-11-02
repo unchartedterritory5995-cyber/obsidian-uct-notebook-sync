@@ -80,6 +80,8 @@ export interface SyncManagerDeps {
 	saveData: (data: PluginData) => Promise<void>;
 	/** Injectable clock for deterministic tests. */
 	now?: () => string;
+	/** Milliseconds, for the attachment upload budget; injectable for tests. */
+	clock?: () => number;
 	batchOptions?: BatchOptions;
 }
 
@@ -150,6 +152,7 @@ export class SyncManager {
 				data,
 				serverUrl: data.serverUrl,
 				token: deviceToken,
+				clock: this.deps.clock,
 			},
 			files.map((f) => f.path),
 		);
