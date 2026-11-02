@@ -214,12 +214,30 @@ describe('prepareAttachments', () => {
 			.file('att/a.png', A);
 		const r = await run(server, vault);
 		expect(r.refsByNote.get('a.md')!.map((x) => x.original)).toEqual(['![[a.png]]']);
+		// the server model refuses both (max_length 2048 / 1024), so neither can be sent:
+		// each becomes a visible Settings issue instead of a silent loss (review I1)
+		expect(r.issues).toEqual([
+			{ path: 'a.png', reason: 'link-too-long', size: 0 },
+			{ path: longName, reason: 'link-too-long', size: 0 },
+		]);
 
 		const many = new FakeVault();
 		const refs = [];
 		for (let i = 0; i < 5003; i++) refs.push(embed(`m${i}.png`));
 		many.note('m.md', 'x', refs);
 		const r2 = await run(new FakeServer(), many);
+		// the first 5000 are sent (the server shows their notices); ONE issue for the rest
 		expect(r2.refsByNote.get('m.md')).toHaveLength(5000);
+		expect(r2.issues.filter((i) => i.reason === 'too-many-files'))
+			.toEqual([{ path: 'm.md', reason: 'too-many-files', size: 0 }]);
+
+		// refs past 5000 that are only note links are not "files not sent"
+		const links = new FakeVault();
+		const mixed = [];
+		for (let i = 0; i < 5000; i++) mixed.push(embed(`m${i}.png`));
+		mixed.push({ original: '[[Some note]]', linkpath: 'Some note', embed: false });
+		links.note('n.md', 'x', mixed);
+		const r3 = await run(new FakeServer(), links);
+		expect(r3.issues.filter((i) => i.reason === 'too-many-files')).toEqual([]);
 	});
 });

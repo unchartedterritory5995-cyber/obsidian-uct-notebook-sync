@@ -98,19 +98,33 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 			continue;
 		}
 		const refs: NoteAttachmentRef[] = [];
+		let overflow = false;
 		for (const raw of vaultSource.listRawRefs(notePath)) {
-			if (refs.length >= MAX_REFS_PER_NOTE) break;
-			if (codePoints(raw.original) > MAX_ORIGINAL_CHARS) continue;
 			const c = classifyRef(raw, vaultSource.resolveRef(raw, notePath));
 			if (c.kind === 'skip') continue;
+			// ⛔ A ref the server model would refuse (`original` over 2048, `path` over
+			// 1024 code points) cannot be sent at all, and the server cannot show a
+			// notice for a ref it never received: a Settings issue is the only visible
+			// signal, so it is never dropped silently (review I1).
+			const refPath = c.kind === 'missing' ? c.ref.path : c.file.path;
+			if (codePoints(raw.original) > MAX_ORIGINAL_CHARS) {
+				addIssue({ path: raw.linkpath, reason: 'link-too-long', size: 0 });
+				continue;
+			}
+			if (codePoints(refPath) > MAX_PATH_CHARS) {
+				addIssue({ path: refPath, reason: 'link-too-long', size: 0 });
+				continue;
+			}
+			if (refs.length >= MAX_REFS_PER_NOTE) {
+				overflow = true; // the first 5000 are sent; ONE issue for the rest
+				continue;
+			}
 			if (c.kind === 'missing') {
-				if (codePoints(c.ref.path) > MAX_PATH_CHARS) continue;
 				refs.push(c.ref);
 				addIssue({ path: c.ref.path, reason: 'missing', size: 0 });
 				continue;
 			}
 			const { file } = c;
-			if (codePoints(file.path) > MAX_PATH_CHARS) continue;
 			const base = { original: raw.original, embed: raw.embed, path: file.path, size: file.size };
 			if (!data.syncAttachments) {
 				refs.push({ ...base, sha256: null, status: 'off' });
@@ -141,6 +155,7 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 			refs.push({ ...base, sha256: sha, status: 'ok' });
 			if (!firstFile.has(sha)) firstFile.set(sha, { path: file.path, size: file.size, extension: file.extension });
 		}
+		if (overflow) addIssue({ path: notePath, reason: 'too-many-files', size: 0 });
 		refsByNote.set(notePath, refs);
 	}
 	// Only paths referenced this run keep a cache entry.

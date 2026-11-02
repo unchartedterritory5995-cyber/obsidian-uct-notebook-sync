@@ -16,6 +16,8 @@ const ATTACHMENT_REASON_TEXT: Record<AttachmentIssue['reason'], string> = {
 	missing: 'not found in this vault',
 	'storage-limit': 'UCT storage is full',
 	'upload-failed': 'upload failed, will retry on the next sync',
+	'link-too-long': 'name or link too long to sync',
+	'too-many-files': 'more than 5000 images and files in one note; the rest were not sent',
 };
 
 export class UctNotebookSyncSettingTab extends PluginSettingTab {
