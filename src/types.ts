@@ -103,7 +103,7 @@ export interface AttachmentIssue {
 	/** `link-too-long`: the ref is over the server's `original`/`path` bounds and cannot
 	 * be sent. `too-many-files`: a note past the 5000-ref cap (one issue per note). */
 	reason: 'too-large' | 'missing' | 'storage-limit' | 'upload-failed' | 'link-too-long' | 'too-many-files'
-		| 'note-too-large-for-files';
+		| 'note-too-large-for-files' | 'server-busy';
 	size: number;
 	/** The server's own sentence, when one failure stands for the whole run (a 403). */
 	message?: string;
@@ -160,6 +160,8 @@ export interface PluginData {
 	 * `null` when it said it does not (or never answered). A transient probe failure
 	 * keeps this, so a supported vault never flips to legacy for one run. */
 	attachmentServer: { maxBytes: number } | null;
+	/** Consecutive runs the server answered busy (429/503) to blob uploads. */
+	attachmentBusyRuns: number;
 }
 
 /**
@@ -202,5 +204,6 @@ export function defaultPluginData(vaultId: string): PluginData {
 		attachmentIssues: [],
 		attachmentsNoticeShown: false,
 		attachmentServer: null,
+		attachmentBusyRuns: 0,
 	};
 }

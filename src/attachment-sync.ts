@@ -36,6 +36,11 @@ export const MAX_REFS_PER_NOTE = 5000;
  * (`_media_retry_rows`), so the first 0.2.0 sync of a large vault pushes its text in
  * about a minute instead of after every upload.
  */
+/** 429 (upload gate) and 503 (volume full / not configured): the server is busy. */
+const BUSY_STATUSES: ReadonlySet<number> = new Set([429, 503]);
+/** Consecutive busy runs before Settings shows a "server busy" issue. */
+export const BUSY_RUNS_FOR_ISSUE = 3;
+
 export const UPLOAD_BUDGET_MS = 60_000;
 export const UPLOAD_BUDGET_BYTES = 100 * 1024 * 1024;
 
@@ -85,12 +90,14 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 	// keeping every hash stable, and uploads nothing: the server shows "retrying".
 	const probe = await transport.checkAttachments({ serverUrl, token, sha256: [] });
 	let offline = false;
+	let probeBusy = false;
 	let maxBytes: number;
 	let remainingBytes: number;
 	if (!probe.ok) {
 		if (probe.authExpired) return { ...legacy(), authExpired: true, failMessage: probe.message };
 		if (data.attachmentServer === null) return legacy();
 		offline = true;
+		probeBusy = BUSY_STATUSES.has(probe.status);
 		maxBytes = data.attachmentServer.maxBytes;
 		remainingBytes = Number.POSITIVE_INFINITY;
 	} else if (!probe.supported) {
@@ -196,7 +203,15 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 	data.attachmentHashes = hashes;
 
 	const result: PrepareResult = { supported: true, refsByNote, sent: 0, issues, authExpired: false };
-	if (offline) return result;
+	// A server too busy to take blobs (429/503) is only "retrying" in the note. After
+	// BUSY_RUNS_FOR_ISSUE runs in a row it is also a Settings issue (review M4); any
+	// run that is not busy resets the count.
+	const settle = (busy: boolean): PrepareResult => {
+		data.attachmentBusyRuns = busy ? data.attachmentBusyRuns + 1 : 0;
+		if (data.attachmentBusyRuns >= BUSY_RUNS_FOR_ISSUE) addIssue({ path: '', reason: 'server-busy', size: 0 });
+		return result;
+	};
+	if (offline) return settle(probeBusy);
 	const allRefs = (): NoteAttachmentRef[] => [...refsByNote.values()].flatMap((r) => r ?? []);
 	const markStorageLimit = (sha: string): void => {
 		for (const r of allRefs()) {
@@ -219,9 +234,9 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 			if (out.authExpired) return { ...result, authExpired: true, failMessage: out.message };
 			// Cannot tell what is missing: upload nothing this run. The refs stay `ok`
 			// (the server shows "retrying") and the next run checks again.
-			return result;
+			return settle(BUSY_STATUSES.has(out.status));
 		}
-		if (!out.supported) return result; // switched off mid-run: the same
+		if (!out.supported) return settle(false); // switched off mid-run: the same
 		missing.push(...out.missing);
 		remainingBytes = out.remainingBytes;
 	}
@@ -232,6 +247,7 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 	const budget = deps.uploadBudget ?? { ms: UPLOAD_BUDGET_MS, bytes: UPLOAD_BUDGET_BYTES };
 	const started = clock();
 	let sentBytes = 0;
+	let busy = false;
 	for (let i = 0; i < missing.length; i++) {
 		if (clock() - started >= budget.ms || sentBytes >= budget.bytes) break; // later runs go on
 		const sha = missing[i]!;
@@ -267,7 +283,11 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 			continue;
 		}
 		if (up.authExpired) return { ...result, authExpired: true, failMessage: up.message };
-		if (up.retryLater) break; // the server is busy or switched off: the next sync's check retries
+		if (up.retryLater) {
+			// the server is busy or switched off: the next sync's check retries
+			busy = BUSY_STATUSES.has(up.status);
+			break;
+		}
 		if (up.storageFull) {
 			for (const rest of missing.slice(i)) markStorageLimit(rest);
 			break;
@@ -279,5 +299,5 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 		}
 		addIssue({ path: f.path, reason: 'upload-failed', size: f.size });
 	}
-	return result;
+	return settle(busy);
 }

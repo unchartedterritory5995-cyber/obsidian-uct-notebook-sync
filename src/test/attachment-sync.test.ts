@@ -174,6 +174,28 @@ describe('prepareAttachments', () => {
 		expect(r2.sent).toBe(2);
 	});
 
+	it('a server busy (429/503) for 3 runs in a row shows a Settings issue; a good run clears it (M4)', async () => {
+		const vault = new FakeVault().note('a.md', 'x', [embed('a.png')]).file('att/a.png', A);
+		const d = data();
+		const busyRun = (status: number) => {
+			const s = new FakeServer();
+			s.uploadScript = [uploadFailure(status, 'busy', { retryLater: true })];
+			return run(s, vault, d);
+		};
+		const busyIssue = { path: '', reason: 'server-busy', size: 0 };
+		expect((await busyRun(429)).issues).toEqual([]);
+		expect((await busyRun(503)).issues).toEqual([]);
+		expect((await busyRun(429)).issues).toEqual([busyIssue]);
+		// a busy probe (offline run) counts too
+		const probeBusy = new FakeServer();
+		probeBusy.checkScript = [{ ok: false, status: 503, message: 'busy', authExpired: false }];
+		expect((await run(probeBusy, vault, d)).issues).toEqual([busyIssue]);
+		// a run that gets its uploads through clears it
+		expect((await run(new FakeServer(), vault, d)).issues).toEqual([]);
+		expect(d.attachmentBusyRuns).toBe(0);
+		expect((await busyRun(429)).issues).toEqual([]);
+	});
+
 	it('the first 403 stops every upload and reports ONE issue with the server sentence', async () => {
 		const server = new FakeServer();
 		server.uploadScript = [uploadFailure(403, 'this vault is no longer connected')];

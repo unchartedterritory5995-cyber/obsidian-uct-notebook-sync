@@ -19,6 +19,7 @@ const ATTACHMENT_REASON_TEXT: Record<AttachmentIssue['reason'], string> = {
 	'link-too-long': 'name or link too long to sync',
 	'too-many-files': 'more than 5000 images and files in one note; the rest were not sent',
 	'note-too-large-for-files': 'note too large to send with its images and files; they were not sent',
+	'server-busy': 'UCT is busy and is not taking images and files right now; will keep retrying',
 };
 
 export class UctNotebookSyncSettingTab extends PluginSettingTab {
@@ -97,7 +98,9 @@ export class UctNotebookSyncSettingTab extends PluginSettingTab {
 			.setHeading();
 		const list = containerEl.createEl('ul');
 		for (const issue of issues) {
-			list.createEl('li', { text: `${issue.path}: ${issue.message ?? ATTACHMENT_REASON_TEXT[issue.reason]}` });
+			const text = issue.message ?? ATTACHMENT_REASON_TEXT[issue.reason];
+			// a run-wide issue (server busy) names no file
+			list.createEl('li', { text: issue.path ? `${issue.path}: ${text}` : text });
 		}
 	}
 
