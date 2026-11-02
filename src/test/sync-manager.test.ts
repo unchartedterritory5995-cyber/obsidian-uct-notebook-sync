@@ -632,6 +632,36 @@ describe('SyncManager.runSync with attachments', () => {
 		expect(t.uploadCalls).toEqual([]);
 	});
 
+	it('a note whose refs would push it past the 2 MB ingest cap goes alone, else without refs and with an issue (M3)', async () => {
+		const t = new FakeServer();
+		const missingRefs = (n: number) => Array.from({ length: n }, (_, i) =>
+			embed(`missing-file-with-a-fairly-long-name-${'x'.repeat(60)}-${i}.png`));
+		const vault = new FakeVault()
+			.note('fits.md', 'f'.repeat(1_700_000), missingRefs(10)) // over the 1.5 MB batch budget, under 2 MB
+			.note('over.md', 'o'.repeat(1_950_000), missingRefs(1000)) // body fits, body + refs does not
+			.note('small.md', '# small', []);
+		const m = mgr(t, vault);
+		const s = await m.runSync();
+		expect(s.ok).toBe(true);
+		const batches = t.ingestCalls.filter((c) => c.final !== true).map((c) => c.notes.map((n) => n.vault_path));
+		expect(batches).toContainEqual(['fits.md']);
+		expect(batches).toContainEqual(['over.md']);
+		const notes = t.pushedNotes();
+		expect(notes.find((n) => n.vault_path === 'fits.md')!.attachments).toHaveLength(10);
+		const over = notes.find((n) => n.vault_path === 'over.md')!;
+		expect('attachments' in over).toBe(false);
+		expect(over.content_hash).toBe(sha256Hex(over.body_md));
+		for (const c of t.ingestCalls) {
+			const body = JSON.stringify({ consent: true, notes: c.notes, manifest: c.manifest, final: c.final });
+			expect(new TextEncoder().encode(body).length).toBeLessThanOrEqual(2_000_000);
+		}
+		expect(store.attachmentIssues).toContainEqual({ path: 'over.md', reason: 'note-too-large-for-files', size: 0 });
+
+		t.reset();
+		await m.runSync();
+		expect(t.pushedNotes()).toEqual([]); // stable: no re-push every run
+	});
+
 	it('a 403 on upload stops uploads but the notes are still pushed', async () => {
 		const t = new FakeServer();
 		t.uploadScript = [uploadFailure(403, 'Upgrade required')];

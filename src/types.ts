@@ -102,7 +102,8 @@ export interface AttachmentIssue {
 	path: string;
 	/** `link-too-long`: the ref is over the server's `original`/`path` bounds and cannot
 	 * be sent. `too-many-files`: a note past the 5000-ref cap (one issue per note). */
-	reason: 'too-large' | 'missing' | 'storage-limit' | 'upload-failed' | 'link-too-long' | 'too-many-files';
+	reason: 'too-large' | 'missing' | 'storage-limit' | 'upload-failed' | 'link-too-long' | 'too-many-files'
+		| 'note-too-large-for-files';
 	size: number;
 	/** The server's own sentence, when one failure stands for the whole run (a 403). */
 	message?: string;

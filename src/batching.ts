@@ -40,6 +40,16 @@ export const DEFAULT_BATCH_OPTIONS: BatchOptions = {
 // `body_md`.
 const OVERHEAD_PER_NOTE_BYTES = 512;
 
+/** The server's `_MAX_OBSIDIAN_INGEST_BYTES` (api/routers/note_sync.py): one ingest
+ * request body over this is refused whole. */
+export const MAX_INGEST_BYTES = 2_000_000;
+
+/** The UTF-8 size of an ingest request carrying only `note`: what it costs when the
+ * batcher sends it alone. */
+export function singleNoteRequestBytes(note: NoteInput): number {
+	return new TextEncoder().encode(JSON.stringify({ consent: true, notes: [note], final: false })).length;
+}
+
 // `TextEncoder` (a typed DOM global, already in tsconfig's `lib`) rather than
 // Node's `Buffer.byteLength` — identical UTF-8 byte count, one less Node
 // builtin reached through a bare specifier that types as `any` under a

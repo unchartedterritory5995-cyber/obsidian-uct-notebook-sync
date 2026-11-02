@@ -18,6 +18,7 @@ const ATTACHMENT_REASON_TEXT: Record<AttachmentIssue['reason'], string> = {
 	'upload-failed': 'upload failed, will retry on the next sync',
 	'link-too-long': 'name or link too long to sync',
 	'too-many-files': 'more than 5000 images and files in one note; the rest were not sent',
+	'note-too-large-for-files': 'note too large to send with its images and files; they were not sent',
 };
 
 export class UctNotebookSyncSettingTab extends PluginSettingTab {

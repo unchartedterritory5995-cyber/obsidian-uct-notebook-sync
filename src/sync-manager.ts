@@ -40,7 +40,9 @@
  * a 401 itself and never schedules a background retry loop against a token
  * it just learned is dead.
  */
-import { buildBatches, DEFAULT_BATCH_OPTIONS, type BatchOptions } from './batching';
+import {
+	buildBatches, DEFAULT_BATCH_OPTIONS, MAX_INGEST_BYTES, singleNoteRequestBytes, type BatchOptions,
+} from './batching';
 import { noteContentHash } from './attachment-refs';
 import { prepareAttachments } from './attachment-sync';
 import { applySyncResult, finalizeManifest, planSync } from './sync-plan';
@@ -163,17 +165,30 @@ export class SyncManager {
 			await this.deps.saveData(data);
 			return empty({ needsReconnect: true, error: message });
 		}
-		data.attachmentIssues = att.issues; // replaced each run
+		data.attachmentIssues = [...att.issues]; // replaced each run
 
 		const scanned: ScannedFile[] = [];
 		for (const f of files) {
 			const body = await this.deps.vaultSource.readFile(f.path);
-			const refs = att.refsByNote.get(f.path) ?? null;
+			let refs = att.refsByNote.get(f.path) ?? null;
+			const updatedAt = new Date(f.mtime).toISOString();
+			// A note over the batch budget already goes alone. If its refs would take even
+			// that single request past the server's 2 MB cap, the server would refuse the
+			// batch on every run and block every later one: send the text without the list
+			// (the server shows its images and files as unavailable) and say so in
+			// Settings (review M3). A body alone over the cap is refused as in 0.1.x.
+			if (refs !== null && refs.length > 0) {
+				const probe = { vault_path: f.path, content_hash: '0'.repeat(64), body_md: body, updated_at: updatedAt, attachments: refs };
+				if (singleNoteRequestBytes(probe) > MAX_INGEST_BYTES) {
+					refs = null;
+					data.attachmentIssues.push({ path: f.path, reason: 'note-too-large-for-files', size: 0 });
+				}
+			}
 			scanned.push({
 				path: f.path,
 				// With no refs this is exactly 0.1.x's sha256Hex(body).
 				hash: noteContentHash(body, refs),
-				updatedAt: new Date(f.mtime).toISOString(),
+				updatedAt,
 				body,
 				attachments: refs,
 			});
@@ -255,7 +270,7 @@ export class SyncManager {
 			needsReconnect: false,
 			attachmentsSupported: att.supported,
 			attachmentsSent: att.sent,
-			attachmentIssues: att.issues.length,
+			attachmentIssues: data.attachmentIssues.length,
 		};
 	}
 }
