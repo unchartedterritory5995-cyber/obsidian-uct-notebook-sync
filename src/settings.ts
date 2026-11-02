@@ -11,6 +11,22 @@ import type UctNotebookSyncPlugin from './main';
 import { validateServerUrl } from './server-url';
 import type { AttachmentIssue } from './types';
 
+/** Longest path or link shown in the issues list, in code points. */
+const DISPLAY_MAX = 120;
+
+/**
+ * A path or link cut to `max` code points for the issues list: the start, an
+ * ellipsis, and the end (which holds the file name). The full value stays in the
+ * row's tooltip.
+ */
+export function shortenForDisplay(text: string, max = DISPLAY_MAX): string {
+	const cps = Array.from(text);
+	if (cps.length <= max) return text;
+	const tail = Math.ceil((max - 1) * 2 / 3);
+	const head = max - 1 - tail;
+	return [...cps.slice(0, head), '…', ...cps.slice(cps.length - tail)].join('');
+}
+
 const ATTACHMENT_REASON_TEXT: Record<AttachmentIssue['reason'], string> = {
 	'too-large': 'larger than 25 MB',
 	missing: 'not found in this vault',
@@ -106,7 +122,9 @@ export class UctNotebookSyncSettingTab extends PluginSettingTab {
 		for (const issue of issues) {
 			const text = issue.message ?? ATTACHMENT_REASON_TEXT[issue.reason];
 			// a run-wide issue (server busy) names no file
-			list.createEl('li', { text: issue.path ? `${issue.path}: ${text}` : text });
+			list.createEl('li', issue.path
+				? { text: `${shortenForDisplay(issue.path)}: ${text}`, attr: { title: issue.path } }
+				: { text });
 		}
 	}
 
