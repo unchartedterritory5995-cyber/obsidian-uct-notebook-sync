@@ -47,6 +47,8 @@ import {
 /** Runs an unindexed note that last carried refs is deferred before its text is pushed
  * without the list (review N1). */
 export const MAX_DEFERRED_RUNS = 3;
+
+export const SERVER_CHANGED_MESSAGE = 'Server address changed — reconnect to sync';
 import { noteContentHash } from './attachment-refs';
 import { prepareAttachments } from './attachment-sync';
 import { applySyncResult, finalizeManifest, planSync } from './sync-plan';
@@ -147,6 +149,16 @@ export class SyncManager {
 		// reasoning) survives the `await`s below — `data.deviceToken` itself
 		// stays `string | null` since `fail()` may null it out mid-run.
 		const deviceToken: string = data.deviceToken;
+
+		// ⛔ The token goes only to the origin it was redeemed against. A Server URL edited
+		// to a typo or to an address someone else supplied would otherwise receive the
+		// member's bearer token and their notes (final review I6). Kept, not cleared:
+		// changing the field back makes it work again.
+		if (data.tokenOrigin !== null && data.tokenOrigin !== data.serverUrl) {
+			data.lastSyncError = SERVER_CHANGED_MESSAGE;
+			await this.deps.saveData(data);
+			return empty({ error: SERVER_CHANGED_MESSAGE });
+		}
 
 		const now = (this.deps.now ?? isoNow)();
 		const files = await this.deps.vaultSource.listMarkdownFiles();

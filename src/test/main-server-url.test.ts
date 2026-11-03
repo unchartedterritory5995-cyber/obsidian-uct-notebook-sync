@@ -6,6 +6,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { IngestParams, RedeemParams, Transport } from '../api-client';
 import UctNotebookSyncPlugin from '../main';
+import { commitServerUrl } from '../settings';
 import { notices, TFile } from './obsidian-stub';
 
 class RecordingTransport implements Transport {
@@ -136,6 +137,39 @@ describe('plugin wiring of the Server URL guard', () => {
 		shown = false;
 		await plugin.runManualSync();
 		expect(display).toHaveBeenCalledTimes(1);
+	});
+
+	it('binds the token to the origin it was redeemed against (final review I6)', async () => {
+		const { plugin, transport } = await makePlugin('https://uctintelligence.com', null);
+		await plugin.redeemConnectCode('CODE');
+		expect(plugin.data.tokenOrigin).toBe('https://uctintelligence.com');
+
+		// the field now names another (valid) origin: no token goes there
+		plugin.data.serverUrl = 'https://uctinteligence.com';
+		const s = await plugin.runManualSync();
+		expect(s.ok).toBe(false);
+		expect(transport.ingestCalls).toHaveLength(0);
+		expect(notices.some((n) => n.includes('Server address changed'))).toBe(true);
+
+		// back to the original origin: syncs again
+		plugin.data.serverUrl = 'https://uctintelligence.com';
+		expect((await plugin.runManualSync()).ok).toBe(true);
+	});
+
+	it('an upgraded install with a token binds it to the origin it already uses', async () => {
+		const { plugin } = await makePlugin('uctintelligence.com', 'tok');
+		expect(plugin.data.tokenOrigin).toBe('https://uctintelligence.com');
+	});
+
+	it('the Server URL field saves only on commit (blur/Enter), and only a valid value', async () => {
+		const { plugin } = await makePlugin('https://uctintelligence.com', null);
+		const saves = (plugin as any).saveCalls.length;
+		expect(await commitServerUrl(plugin, 'https://uct')).toMatchObject({ ok: true });
+		expect(plugin.data.serverUrl).toBe('https://uct');
+		expect((plugin as any).saveCalls.length).toBe(saves + 1);
+		expect(await commitServerUrl(plugin, 'ftp://x')).toMatchObject({ ok: false });
+		expect(plugin.data.serverUrl).toBe('https://uct');
+		expect((plugin as any).saveCalls.length).toBe(saves + 1);
 	});
 
 	it('the lock is released after an invalid-URL refusal', async () => {

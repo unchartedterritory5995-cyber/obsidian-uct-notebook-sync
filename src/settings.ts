@@ -8,7 +8,8 @@
 import { Notice, PluginSettingTab, Setting } from 'obsidian';
 import type { App } from 'obsidian';
 import type UctNotebookSyncPlugin from './main';
-import { validateServerUrl } from './server-url';
+import { validateServerUrl, type ServerUrlResult } from './server-url';
+import { SERVER_CHANGED_MESSAGE } from './sync-manager';
 import type { AttachmentIssue } from './types';
 
 /** Longest path or link shown in the issues list, in code points. */
@@ -64,6 +65,22 @@ export function issueText(issue: AttachmentIssue): string {
 	return ATTACHMENT_REASON_TEXT[issue.reason];
 }
 
+/**
+ * Save a Server URL the member committed (blur or Enter): validated and normalized,
+ * saved only if valid and only if it changed.
+ */
+export async function commitServerUrl(
+	plugin: { data: { serverUrl: string }; saveData(data: unknown): Promise<void> },
+	value: string,
+): Promise<ServerUrlResult> {
+	const result = validateServerUrl(value);
+	if (result.ok && result.url !== plugin.data.serverUrl) {
+		plugin.data.serverUrl = result.url;
+		await plugin.saveData(plugin.data);
+	}
+	return result;
+}
+
 export class UctNotebookSyncSettingTab extends PluginSettingTab {
 	private connectCode = '';
 
@@ -94,23 +111,33 @@ export class UctNotebookSyncSettingTab extends PluginSettingTab {
 		// Created once and reused across changes, so the message never stacks.
 		const errorEl = urlSetting.descEl.createDiv({ cls: 'uct-notebook-sync-error' });
 		errorEl.hide();
-		urlSetting.addText((text) =>
+		const showUrlResult = (result: ServerUrlResult): void => {
+			if (result.ok) {
+				errorEl.setText('');
+				errorEl.hide();
+			} else {
+				errorEl.setText(result.message);
+				errorEl.show();
+			}
+		};
+		urlSetting.addText((text) => {
+			// Typing only validates. The value is SAVED on blur or Enter (final review
+			// I6): saving every valid keystroke stored each intermediate origin, so a sync
+			// mid-edit could go to a half-typed address.
 			text
 				.setPlaceholder('https://uctintelligence.com')
 				.setValue(data.serverUrl)
-				.onChange(async (value) => {
-					const result = validateServerUrl(value);
-					if (!result.ok) {
-						errorEl.setText(result.message);
-						errorEl.show();
-						return;
-					}
-					errorEl.setText('');
-					errorEl.hide();
-					data.serverUrl = result.url;
-					await this.plugin.saveData(data);
-				}),
-		);
+				.onChange((value) => showUrlResult(validateServerUrl(value)));
+			const commit = async (): Promise<void> => {
+				const result = await commitServerUrl(this.plugin, text.getValue());
+				showUrlResult(result);
+				if (result.ok) this.display();
+			};
+			text.inputEl.addEventListener('blur', () => { void commit(); });
+			text.inputEl.addEventListener('keydown', (e: KeyboardEvent) => {
+				if (e.key === 'Enter') void commit();
+			});
+		});
 
 		if (data.deviceToken) {
 			this.renderConnected(containerEl);
@@ -179,6 +206,7 @@ export class UctNotebookSyncSettingTab extends PluginSettingTab {
 					// fresh device where reconnecting is easier than
 					// tracking down the old token.
 					data.deviceToken = null;
+					data.tokenOrigin = null;
 					data.connectedLabel = null;
 					data.connectedAt = null;
 					await this.plugin.saveData(data);
@@ -193,7 +221,12 @@ export class UctNotebookSyncSettingTab extends PluginSettingTab {
 				cls: 'setting-item-description',
 			});
 		}
-		if (data.lastSyncError) {
+		if (data.tokenOrigin !== null && data.tokenOrigin !== data.serverUrl) {
+			containerEl.createEl('p', {
+				text: `${SERVER_CHANGED_MESSAGE}: this connection belongs to ${data.tokenOrigin}.`,
+				cls: 'uct-notebook-sync-error',
+			});
+		} else if (data.lastSyncError) {
 			containerEl.createEl('p', {
 				text: `Last sync error: ${data.lastSyncError}`,
 				cls: 'uct-notebook-sync-error',

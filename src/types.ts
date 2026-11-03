@@ -178,6 +178,10 @@ export interface PluginData {
 	attachmentBusyRuns: number;
 	/** Consecutive offline runs for any other reason (a refused or failing check). */
 	attachmentCheckFailRuns: number;
+	/** The origin the device token was redeemed against. The token is never sent to
+	 * any other origin: a Server URL edited to a typo or a stranger's address cannot
+	 * receive it (final review I6). `null` = no token, or not yet bound. */
+	tokenOrigin: string | null;
 }
 
 /**
@@ -222,5 +226,6 @@ export function defaultPluginData(vaultId: string): PluginData {
 		attachmentServer: null,
 		attachmentBusyRuns: 0,
 		attachmentCheckFailRuns: 0,
+		tokenOrigin: null,
 	};
 }

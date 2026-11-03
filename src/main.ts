@@ -9,7 +9,7 @@
  */
 import { Notice, Plugin } from 'obsidian';
 import { ObsidianHttpTransport, type RedeemOutcome } from './api-client';
-import { normalizeSavedServerUrl } from './server-url';
+import { normalizeSavedServerUrl, validateServerUrl } from './server-url';
 import { UctNotebookSyncSettingTab } from './settings';
 import { SyncManager, type SyncSummary } from './sync-manager';
 import { defaultPluginData, type PluginData, clearStagedState} from './types';
@@ -69,6 +69,13 @@ export default class UctNotebookSyncPlugin extends Plugin {
 		// missing it for some reason).
 		const vaultId = stored?.vaultId ?? crypto.randomUUID();
 		this.data = { ...defaultPluginData(vaultId), ...stored, vaultId };
+		// An install upgraded with a token already in use binds it to the origin it is
+		// already sending it to, so the origin guard (final review I6) changes nothing
+		// for it until the field is edited.
+		if (this.data.deviceToken && this.data.tokenOrigin === null) {
+			const current = validateServerUrl(this.data.serverUrl);
+			if (current.ok) this.data.tokenOrigin = current.url;
+		}
 	}
 
 	async redeemConnectCode(code: string): Promise<RedeemOutcome> {
@@ -93,6 +100,7 @@ export default class UctNotebookSyncPlugin extends Plugin {
 			// is a full re-push.
 			this.data = clearStagedState(this.data);
 			this.data.deviceToken = result.token;
+			this.data.tokenOrigin = urlCheck.url;
 			this.data.connectedLabel = label;
 			this.data.connectedAt = new Date().toISOString();
 			await this.saveData(this.data);

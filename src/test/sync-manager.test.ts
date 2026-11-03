@@ -383,6 +383,25 @@ describe('SyncManager.runSync', () => {
 	});
 });
 
+describe('SyncManager token origin (final review I6)', () => {
+	it('never sends the token to an origin other than the one it was redeemed against', async () => {
+		const t = new FakeServer();
+		let saved: PluginData | null = null;
+		const data = makeData({ serverUrl: 'https://uctinteligence.com', tokenOrigin: 'https://uctintelligence.com' });
+		const m = new SyncManager({
+			transport: t, vaultSource: new FakeVault().note('a.md', '# a', []),
+			getData: () => data, saveData: async (d) => { saved = d; },
+		});
+		const s = await m.runSync();
+		expect(s.ok).toBe(false);
+		expect(s.error).toBe('Server address changed — reconnect to sync');
+		expect(t.checkCalls).toEqual([]);
+		expect(t.ingestCalls).toEqual([]);
+		expect(data.deviceToken).toBe('device-token-1'); // kept: changing the field back works
+		expect(saved!.lastSyncError).toBe('Server address changed — reconnect to sync');
+	});
+});
+
 // ── Plan C Task 10: sync with attachments ──
 
 describe('SyncManager.runSync with attachments', () => {
