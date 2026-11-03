@@ -41,8 +41,9 @@ function namesExactly(dest: TFile, text: string): boolean {
  * the server's: on one line its `_WIKI_TARGET` excludes `]`, `|` and the stop `[[` (every
  * other `_WIKI_STOP`, the `<` one included, starts at a `\n`). This also excludes any
  * `[`, a `<` and a lone `\r` (a line break to Obsidian's editor): stricter is safe, a
- * doubt sends no ref, which is 0.2.0's behaviour. Checked by a differential fuzz against
- * the server regex (fix round 1, M1). */
+ * doubt sends no ref, which is 0.2.0's behaviour. A one-off differential fuzz against the
+ * server regex in fix round 1 (M1) found no original the plugin accepts and the server does
+ * not split; it is not kept as a test. */
 const ALIAS_HEAD_RE = /\[\[([^[\]|<\r]+)\|$/;
 
 /** An embed the server splits back out of a whole-link original, a `![[...]]` its

@@ -207,7 +207,7 @@ describe('ObsidianVaultSource.listRawRefs: a link whose label is an embed (issue
 				{ original: '![](img.png)', linkpath: 'img.png', embed: true },
 			]);
 		}
-		// a `<` in the embed stops the server's `_WIKI_EMBED`, so it would not split it either
+		// a `<` in the embed: the server would split it mid-line, but the plugin is stricter on purpose (no ref, 0.2.0's behaviour)
 		for (const e of ['![[a<b.png]]', '![[img.png|<x]]']) {
 			const body = `x [[q.pdf|${e}]] y\n`;
 			expect(refsFor(body, { embeds: [at(body, e, 'x')] }), e).toEqual([{ original: e, linkpath: 'x', embed: true }]);
