@@ -41,8 +41,10 @@ reconnect with a fresh code at any time.
   - A **Sync now** button, connection status, last-sync timestamp, and the
     last sync error (if any).
   - A visible list of **notes that could not sync** because they're too
-    large once converted (see "Too-large notes" below) — never a silent
-    failure.
+    large to send or to store once converted (see "Too-large notes" below) —
+    never a silent failure.
+  - A **Sync images and files** toggle (on by default) and a list of the
+    **images and files that could not sync**, each with its reason.
 - Adds a **command** ("Sync vault to UCT Notebook") and a **ribbon icon**
   for manual sync — there is no background/scheduled sync in this first
   release (see "Deliberately out of scope").
@@ -50,23 +52,36 @@ reconnect with a fresh code at any time.
   pushes only the files that changed since the last sync (in batches), then
   sends the vault's complete current file list as a `final` manifest so the
   server can detect deletions.
+- **Images and files (0.2.0).** Before pushing notes, the plugin asks
+  Obsidian's own link index which images and files each note embeds or links
+  to, resolved exactly as Obsidian resolves them. It uploads each such file
+  the server does not already hold, **once** (files are identified by their
+  SHA-256, so the same file used by many notes, or renamed, is never sent
+  twice), and pushes each note with the list of files it uses. Only files a
+  note actually references are ever read or sent; a file that resolves
+  outside the vault index (for example inside `.obsidian/`) never resolves at
+  all. Per-file and per-member limits come from the server (25 MB per file
+  today). A run uploads for about a minute (or 100 MB) and then pushes the
+  note text; remaining files follow on later syncs, and the Notebook shows
+  them as "retrying" until they arrive. A file that cannot come over (too
+  large, missing from the vault, storage full) is shown as a notice in the
+  note and listed in Settings. An older UCT server without this feature is
+  detected automatically, and the plugin then behaves exactly as 0.1.x did.
 
 ## What it does NOT do (by design)
 
-- **No attachment/image upload.** Only markdown text is sent. An
-  `![[embedded image]]` or a link to a local file stays as a broken
-  reference in the synced copy — the server-side provider
-  (`providers/obsidian.py::fetch_media`) refuses local vault attachments
-  outright. A note that already links to a public `https://` image is the
-  one case that resolves.
+- **No file a note does not reference is ever read or sent**, and nothing
+  outside Obsidian's vault index (such as `.obsidian/`, where this plugin's
+  own token lives) can be. With **Sync images and files** turned off, no
+  file contents are sent at all (see "Privacy" for what is still sent).
 - **Nothing is ever written back into the vault.** This is a one-way push.
 - **No background/interval sync in v1.** Sync only runs when the member
   clicks "Sync now", runs the command, or clicks the ribbon icon. Adding a
   periodic timer is a natural v2, deliberately left out to keep this first
   release small enough to review honestly.
 - **Desktop only** (`isDesktopOnly: true` in `manifest.json`). The plugin
-  uses Node's `crypto` module directly for hashing and vault-id generation,
-  which Obsidian's mobile (Capacitor) runtime does not provide to plugins.
+  hashes notes and files synchronously with Node's `crypto` module, which
+  Obsidian's mobile (Capacitor) runtime does not provide to plugins.
 - **No infinite retry of a too-large note.** See below.
 - **A rename is not tracked as a rename.** Every note's server-side identity
   is derived from its `vault_path` (there is no stable per-note id this
@@ -128,17 +143,24 @@ tests that pin this behavior.
 ```
 src/
   types.ts          Wire shapes + persisted-settings shape. No obsidian import.
-  hashing.ts         sha256Hex() — content hashing.
+  hashing.ts         sha256Hex() / sha256HexBytes() — note and file hashing.
   batching.ts         Splits changed notes into batches under the server's
-                      note-count and byte-size ceilings.
+                      note-count and byte-size ceilings; the 2 MB request check.
   sync-plan.ts         Pure decision logic: what to push, what to manifest,
                       too-large tracking, delete detection. No obsidian import.
+  server-url.ts        Server URL validation and normalization.
   api-client.ts        Transport interface + ObsidianHttpTransport (the one
-                      file that imports obsidian's requestUrl).
-  sync-manager.ts       Orchestrates scan -> plan -> batch -> push -> manifest
-                      -> persist. Depends only on the Transport/VaultSource
-                      interfaces — no obsidian import.
-  vault-source.ts        ObsidianVaultSource — thin adapter over app.vault.
+                      file that makes network requests, via requestUrl):
+                      redeem, ingest, attachment check and upload.
+  attachment-refs.ts   Which of a note's links are attachments (classifyRef),
+                      MIME types, and the attachment-aware content hash.
+  attachment-sync.ts   Phase 0 of a sync: build each note's refs, check which
+                      files the server lacks, upload them within the budget.
+  sync-manager.ts       Orchestrates attachments -> scan -> plan -> batch ->
+                      push -> manifest -> persist, over the Transport and
+                      VaultSource interfaces.
+  vault-source.ts        ObsidianVaultSource — thin adapter over app.vault and
+                      app.metadataCache (Obsidian's own link resolver).
   settings.ts          The settings tab UI.
   main.ts             Plugin entry point; wires everything above together.
 styles.css            The one class settings.ts needs (a themed error color)
@@ -152,13 +174,19 @@ test/
                         exclusion/retry, delete detection, and 401 handling.
   api-client.test.ts     Exercises the real HTTP-shaping logic against a
                         stubbed requestUrl (obsidian-stub.ts).
+  attachment-refs.test.ts, attachment-sync.test.ts, vault-source.test.ts
+                        Attachment classification, phase 0 against a fake
+                        vault and a fake server, and the Obsidian adapter.
+  fixtures/server-parity/ Copies of the server's parity fixtures: the refs this
+                        plugin builds must equal the refs the server expects.
 ```
 
-`sync-plan.ts`, `batching.ts`, `hashing.ts`, and `sync-manager.ts`
-deliberately have **zero** dependency on the `obsidian` module — every
-decision the plugin makes is unit-testable in plain Node, with no live
-vault and no live server. Only `api-client.ts`, `vault-source.ts`,
-`settings.ts`, and `main.ts` touch the real Obsidian API.
+`sync-plan.ts`, `batching.ts` and `hashing.ts` have **zero** dependency on
+the `obsidian` module. `sync-manager.ts` and `attachment-sync.ts` depend only
+on the Transport/VaultSource interfaces, plus `parseLinktext` through
+`attachment-refs.ts`; the tests alias `obsidian` to `src/test/obsidian-stub.ts`,
+so every decision the plugin makes is unit-testable in plain Node, with no
+live vault and no live server.
 
 ## The wire contract (server side — read before changing anything here)
 
@@ -178,6 +206,12 @@ other:
 - `api/services/journal_two/note_connectors/obsidian_link.py` — connect-code
   mint/redeem and device-token semantics (reconnecting the same
   `vaultId` **rotates** the device token rather than refusing).
+- `api/routers/note_sync.py` (0.2.0) — `POST /obsidian/attachments/check`
+  (`protocol`, `missing`, `maxBytes`, `remainingBytes`, `maxRefsPerNote`),
+  `PUT /obsidian/attachments/{sha256}`, the per-note `attachments` list on
+  ingest (`ObsidianAttachmentRef`), and the `X-UCT-Plugin-Version` header.
+  `providers/obsidian.py` turns each ref's `original` into the image, file chip
+  or notice. A 404/405 on the check route means "no attachment support".
 
 If the server-side contract changes, this plugin needs a matching update —
 there is no shared type-checking across the two repositories, so changes on
@@ -199,11 +233,29 @@ settings (with Restricted Mode turned off for that vault).
 
 ## Privacy / consent
 
-Matches the disclosure shown in the dashboard's own "Connect Obsidian"
-modal before a connect code can be minted: once connected, this plugin sends the **markdown text** of vault notes
-(file path, content, and last-modified time) to the configured server. It
-does **not** upload attachments or images stored in the vault, and nothing
-is ever written back into the vault. Consent is captured on the dashboard
-side, before a connect code can even be minted — this plugin has no
-separate consent surface of its own because a device token cannot exist
-without that consent having already been given.
+Once connected, this plugin sends to the configured server, and only to the
+server the device token was issued by:
+
+- the **markdown text** of vault notes (file path, content, and last-modified
+  time);
+- **the images and files your notes reference** (0.2.0): their contents,
+  uploaded once each, plus for each note the list of files it uses (the link
+  text as written, the file's vault path, size and SHA-256). Files no note
+  references are never read or sent. A referenced file that is not in the
+  vault is reported by the name as written;
+- with **Sync images and files turned off**, no file contents are sent, but
+  each note's list still names the files it references (link text, vault
+  path and size, no contents), so the Notebook can show where they were;
+- on every request, an `X-UCT-Plugin-Version` header with this plugin's
+  version.
+
+Nothing is ever written back into the vault. The device token is stored in
+this vault's plugin data (`.obsidian/plugins/uct-notebook-sync/data.json`);
+if you sync your vault folder with another tool, that file travels with it.
+
+Consent is captured on the dashboard side, before a connect code can even be
+minted. Members who connected under 0.1.x (note text only) see a one-time
+notice on the first sync that would send files, and that sync sends nothing
+about files at all (no file contents, no file lists: only note text, as
+0.1.x did). File lists and uploads start on the next sync, unless file sync
+has been turned off in Settings by then.

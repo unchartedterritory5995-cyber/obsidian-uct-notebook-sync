@@ -28,7 +28,7 @@ import { createHash as nodeCreateHash } from 'crypto';
  * making it async would ripple through the whole sync planner.
  */
 interface Sha256Hasher {
-	update(data: string, inputEncoding: 'utf8'): Sha256Hasher;
+	update(data: string | Uint8Array, inputEncoding?: 'utf8'): Sha256Hasher;
 	digest(encoding: 'hex'): string;
 }
 
@@ -36,4 +36,10 @@ const createHash = nodeCreateHash as unknown as (algorithm: string) => Sha256Has
 
 export function sha256Hex(content: string): string {
 	return createHash('sha256').update(content, 'utf8').digest('hex');
+}
+
+/** SHA-256 hex of raw bytes (an attachment as `vault.readBinary` returns it). The
+ * server's blob store keys on this same digest of the uploaded bytes. */
+export function sha256HexBytes(data: ArrayBuffer): string {
+	return createHash('sha256').update(new Uint8Array(data)).digest('hex');
 }

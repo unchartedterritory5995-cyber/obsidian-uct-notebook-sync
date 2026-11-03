@@ -40,6 +40,41 @@ export const DEFAULT_BATCH_OPTIONS: BatchOptions = {
 // `body_md`.
 const OVERHEAD_PER_NOTE_BYTES = 512;
 
+/** The server's `_MAX_OBSIDIAN_INGEST_BYTES` (api/routers/note_sync.py): one ingest
+ * request body over this is refused whole. */
+export const MAX_INGEST_BYTES = 2_000_000;
+
+/** The UTF-8 size of an ingest request carrying only `note`: what it costs when the
+ * batcher sends it alone. */
+export function singleNoteRequestBytes(note: NoteInput): number {
+	return new TextEncoder().encode(JSON.stringify({ consent: true, notes: [note], final: false })).length;
+}
+
+/** JSON keys, punctuation and numbers around one note in a request, and around one ref:
+ * generous over-counts, so the upper bound below stays an upper bound. */
+const REQUEST_FRAME_BYTES = 200;
+const REF_FRAME_BYTES = 120;
+/** One UTF-16 unit is at most 6 bytes once JSON-escaped and UTF-8 encoded (`\u0000`). */
+const MAX_BYTES_PER_UNIT = 6;
+
+/**
+ * Whether `note` sent alone would be over `MAX_INGEST_BYTES`, without serializing it
+ * unless it has to (review N2). Every UTF-16 unit costs at least 1 and at most 6 bytes
+ * on the wire, so the character count gives a sound lower and upper bound. Only a note
+ * between the two (bodies from about 330 KB up to 2 MB) is serialized and measured
+ * exactly, so the 2 MB guarantee never rests on an estimate.
+ */
+export function exceedsIngestCap(note: NoteInput): boolean {
+	let units = note.vault_path.length + note.content_hash.length + note.body_md.length + note.updated_at.length;
+	const refs = note.attachments ?? [];
+	for (const r of refs) units += r.original.length + r.path.length + (r.sha256?.length ?? 4) + r.status.length;
+	const lower = units;
+	const upper = units * MAX_BYTES_PER_UNIT + REQUEST_FRAME_BYTES + refs.length * REF_FRAME_BYTES;
+	if (upper <= MAX_INGEST_BYTES) return false;
+	if (lower > MAX_INGEST_BYTES) return true;
+	return singleNoteRequestBytes(note) > MAX_INGEST_BYTES;
+}
+
 // `TextEncoder` (a typed DOM global, already in tsconfig's `lib`) rather than
 // Node's `Buffer.byteLength` — identical UTF-8 byte count, one less Node
 // builtin reached through a bare specifier that types as `any` under a
@@ -62,7 +97,9 @@ export function buildBatches(
 	let currentBytes = 0;
 
 	for (const note of notes) {
-		const noteBytes = utf8ByteLength(note.body_md) + OVERHEAD_PER_NOTE_BYTES;
+		const noteBytes = utf8ByteLength(note.body_md) + OVERHEAD_PER_NOTE_BYTES
+			// attachment refs ride in the same JSON body
+			+ utf8ByteLength(JSON.stringify(note.attachments ?? []));
 		const wouldExceedBytes = current.length > 0 && currentBytes + noteBytes > opts.maxBytes;
 		const wouldExceedCount = current.length >= opts.maxNotes;
 		if (wouldExceedBytes || wouldExceedCount) {

@@ -83,12 +83,16 @@ export interface SyncPlan {
 }
 
 function toNoteInput(file: ScannedFile): NoteInput {
-	return {
+	const note: NoteInput = {
 		vault_path: file.path,
 		content_hash: file.hash,
 		body_md: file.body,
 		updated_at: file.updatedAt,
 	};
+	// Only a real list goes on the wire. `null` (an older server, or a note not yet
+	// indexed) omits the field: the server reads an absent list as "none sent".
+	if (file.attachments) note.attachments = file.attachments;
+	return note;
 }
 
 export function planSync(scanned: ScannedFile[], priorFiles: Record<string, FileState>): SyncPlan {
@@ -191,8 +195,10 @@ export function applySyncResult(
 				syncedAt: priorFiles[file.path]?.syncedAt ?? '',
 				tooLarge: true,
 			};
+			if (priorFiles[file.path]?.hadRefs) next[file.path]!.hadRefs = true;
 		} else if (wasPushed) {
 			next[file.path] = { hash: file.hash, syncedAt: now, tooLarge: false };
+			if ((file.attachments?.length ?? 0) > 0) next[file.path]!.hadRefs = true;
 		} else {
 			next[file.path] = priorFiles[file.path] ?? { hash: file.hash, syncedAt: now, tooLarge: false };
 		}

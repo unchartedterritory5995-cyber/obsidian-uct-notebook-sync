@@ -11,3 +11,6 @@ data.json
 # Editor / OS
 .DS_Store
 *.log
+
+# local agent working notes (never published)
+.superpowers/

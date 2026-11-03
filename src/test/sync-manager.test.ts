@@ -5,8 +5,14 @@
  * actually holds together end to end, not just as isolated pure functions.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { IngestOutcome, IngestParams, RedeemOutcome, RedeemParams, Transport } from '../api-client';
+import type {
+	CheckOutcome, CheckParams, IngestOutcome, IngestParams, RedeemOutcome, RedeemParams, Transport,
+	UploadOutcome, UploadParams,
+} from '../api-client';
 import { SyncManager, type VaultFileRef, type VaultSource } from '../sync-manager';
+import { noteContentHash, type RawLinkRef, type ResolvedFile } from '../attachment-refs';
+import { sha256Hex } from '../hashing';
+import { bytes, embed, FakeServer, FakeVault, shaOf, uploadFailure } from './attachment-fakes';
 import { defaultPluginData, type PluginData } from '../types';
 
 class FakeVaultSource implements VaultSource {
@@ -21,6 +27,15 @@ class FakeVaultSource implements VaultSource {
 		if (body === undefined) throw new Error(`no such file: ${path}`);
 		return body;
 	}
+
+	// The attachment half of VaultSource (Plan C Task 8/10): a text-only vault,
+	// every note indexed and holding no links.
+	async whenMetadataReady(): Promise<void> {}
+	isIndexed(): boolean { return true; }
+	listRawRefs(): RawLinkRef[] { return []; }
+	resolveLink(): ResolvedFile | null { return null; }
+	resolveRef(): ResolvedFile | null { return null; }
+	async readBinary(path: string): Promise<ArrayBuffer> { throw new Error(`no binary: ${path}`); }
 }
 
 /** Records every ingest call it receives (in order) and answers from a
@@ -54,6 +69,35 @@ class FakeTransport implements Transport {
 		if (!next) throw new Error('FakeTransport.redeem called with no queued outcome');
 		return next;
 	}
+
+	// Scripted attachment calls (Plan C Task 9). With nothing queued, check answers
+	// "unsupported" (a 0.1.x server), so every pre-attachment test runs unchanged.
+	checkCalls: CheckParams[] = [];
+	uploadCalls: UploadParams[] = [];
+	private checkQueue: CheckOutcome[] = [];
+	private uploadQueue: UploadOutcome[] = [];
+
+	queueCheck(outcome: CheckOutcome): this {
+		this.checkQueue.push(outcome);
+		return this;
+	}
+
+	queueUpload(outcome: UploadOutcome): this {
+		this.uploadQueue.push(outcome);
+		return this;
+	}
+
+	async checkAttachments(params: CheckParams): Promise<CheckOutcome> {
+		this.checkCalls.push(params);
+		return this.checkQueue.shift() ?? { ok: true, supported: false };
+	}
+
+	async uploadAttachment(params: UploadParams): Promise<UploadOutcome> {
+		this.uploadCalls.push(params);
+		const next = this.uploadQueue.shift();
+		if (!next) throw new Error('FakeTransport.uploadAttachment called with no queued outcome');
+		return next;
+	}
 }
 
 function okIngest(overrides: Partial<IngestOutcome & { ok: true }> = {}): IngestOutcome {
@@ -64,8 +108,11 @@ function okIngest(overrides: Partial<IngestOutcome & { ok: true }> = {}): Ingest
 	};
 }
 
+/** Consent already given (the first-run "notice, no uploads" rule has its own tests). */
 function makeData(overrides: Partial<PluginData> = {}): PluginData {
-	return { ...defaultPluginData('vault-uuid-1'), deviceToken: 'device-token-1', ...overrides };
+	return {
+		...defaultPluginData('vault-uuid-1'), deviceToken: 'device-token-1', attachmentsNoticeShown: true, ...overrides,
+	};
 }
 
 describe('SyncManager.runSync', () => {
@@ -336,5 +383,586 @@ describe('SyncManager.runSync', () => {
 		expect(data.vaultId).toBe('stable-vault-id');
 		// Exactly one call was made — a 401 must not trigger an automatic retry.
 		expect(transport.ingestCalls).toHaveLength(1);
+	});
+});
+
+describe('SyncManager.abort (final review M3)', () => {
+	it('an abort (plugin unloaded) stops the run before its next request', async () => {
+		const t = new FakeServer();
+		const vault = new FakeVault().note('a.md', '# a', []).note('b.md', '# b', []);
+		const data = makeData();
+		let m!: SyncManager;
+		const realIngest = t.ingest.bind(t);
+		t.ingest = async (p) => { const out = await realIngest(p); m.abort(); return out; };
+		m = new SyncManager({
+			transport: t, vaultSource: vault, getData: () => data, saveData: async () => {},
+			batchOptions: { maxNotes: 1, maxBytes: 1_000_000 },
+		});
+		const s = await m.runSync();
+		expect(s.ok).toBe(false);
+		expect(s.error).toMatch(/stopped/i);
+		expect(t.ingestCalls).toHaveLength(1); // no second batch, no manifest
+	});
+});
+
+describe('SyncManager token origin binding at first sync (N2)', () => {
+	it('an unbound token is bound to the (valid, normalized) Server URL on its first sync, then guarded', async () => {
+		const t = new FakeServer();
+		const data = makeData({ serverUrl: 'https://uctintelligence.com', tokenOrigin: null });
+		const m = new SyncManager({
+			transport: t, vaultSource: new FakeVault().note('a.md', '# a', []),
+			getData: () => data, saveData: async () => {},
+		});
+		expect((await m.runSync()).ok).toBe(true);
+		expect(data.tokenOrigin).toBe('https://uctintelligence.com');
+
+		data.serverUrl = 'https://uctinteligence.com';
+		t.reset();
+		const s = await m.runSync();
+		expect(s.error).toBe('Server address changed — reconnect to sync');
+		expect(t.checkCalls).toEqual([]);
+	});
+
+	it('never binds to a Server URL that is not a valid normalized origin', async () => {
+		const data = makeData({ serverUrl: 'ftp://uctintelligence.com', tokenOrigin: null });
+		const m = new SyncManager({
+			transport: new FakeServer(), vaultSource: new FakeVault(),
+			getData: () => data, saveData: async () => {},
+		});
+		await m.runSync();
+		expect(data.tokenOrigin).toBeNull();
+	});
+});
+
+describe('SyncManager token origin (final review I6)', () => {
+	it('never sends the token to an origin other than the one it was redeemed against', async () => {
+		const t = new FakeServer();
+		let saved: PluginData | null = null;
+		const data = makeData({ serverUrl: 'https://uctinteligence.com', tokenOrigin: 'https://uctintelligence.com' });
+		const m = new SyncManager({
+			transport: t, vaultSource: new FakeVault().note('a.md', '# a', []),
+			getData: () => data, saveData: async (d) => { saved = d; },
+		});
+		const s = await m.runSync();
+		expect(s.ok).toBe(false);
+		expect(s.error).toBe('Server address changed — reconnect to sync');
+		expect(t.checkCalls).toEqual([]);
+		expect(t.ingestCalls).toEqual([]);
+		expect(data.deviceToken).toBe('device-token-1'); // kept: changing the field back works
+		expect(saved!.lastSyncError).toBe('Server address changed — reconnect to sync');
+	});
+});
+
+// ── Plan C Task 10: sync with attachments ──
+
+describe('SyncManager.runSync with attachments', () => {
+	let store: PluginData;
+	const B = bytes('the chart');
+
+	function mgr(server: FakeServer, vault: FakeVault, initial?: PluginData) {
+		if (initial) store = initial;
+		return new SyncManager({
+			transport: server,
+			vaultSource: vault,
+			getData: () => store,
+			saveData: async (d) => { store = JSON.parse(JSON.stringify(d)) as PluginData; },
+			now: () => '2026-11-02T00:00:00.000Z',
+		});
+	}
+
+	beforeEach(() => {
+		store = makeData();
+	});
+
+	it('uploads a referenced image once, then pushes the note with its ref and an attachment-aware hash', async () => {
+		const t = new FakeServer();
+		const vault = new FakeVault().note('a.md', '![[chart.png]]', [embed('chart.png')]).file('att/chart.png', B);
+		const s = await mgr(t, vault).runSync();
+		expect(s.ok).toBe(true);
+		expect(t.uploadCalls.map((u) => u.sha256)).toEqual([shaOf(B)]);
+		const note = t.ingestCalls[0]!.notes[0]!;
+		expect(note.attachments).toEqual([
+			{ original: '![[chart.png]]', embed: true, path: 'att/chart.png', size: B.byteLength, sha256: shaOf(B), status: 'ok' },
+		]);
+		expect(note.content_hash).toBe(noteContentHash('![[chart.png]]', note.attachments!));
+		expect(s.attachmentsSent).toBe(1);
+		expect(s.attachmentIssues).toBe(0);
+	});
+
+	it('dedupes uploads by content hash across notes and renames', async () => {
+		const t = new FakeServer();
+		const vault = new FakeVault()
+			.note('a.md', '![[one.png]]', [embed('one.png')])
+			.note('b.md', '![[two.png]]', [embed('two.png')])
+			.file('att/one.png', B).file('att/two.png', B);
+		const m = mgr(t, vault);
+		await m.runSync();
+		expect(t.uploadCalls).toHaveLength(1);
+		expect(t.pushedNotes().map((n) => n.vault_path)).toEqual(['a.md', 'b.md']);
+
+		// rename both binaries (same bytes): the path is in the hash, so both notes re-push once
+		delete vault.files['att/one.png'];
+		delete vault.files['att/two.png'];
+		vault.file('img/one.png', B).file('img/two.png', B);
+		t.reset();
+		await m.runSync();
+		expect(t.uploadCalls).toEqual([]);
+		expect(t.pushedNotes().map((n) => [n.vault_path, n.attachments![0]!.path])).toEqual([
+			['a.md', 'img/one.png'], ['b.md', 'img/two.png'],
+		]);
+
+		t.reset();
+		await m.runSync();
+		expect(t.pushedNotes()).toEqual([]);
+		expect(t.uploadCalls).toEqual([]);
+	});
+
+	it('legacy server keeps 0.1.x hashes, then re-sends attachment notes once after server upgrade', async () => {
+		const t = new FakeServer();
+		t.supported = false;
+		const vault = new FakeVault()
+			.note('a.md', '![[chart.png]]', [embed('chart.png')])
+			.note('plain.md', '# plain', [])
+			.file('att/chart.png', B);
+		const m = mgr(t, vault);
+		const s1 = await m.runSync();
+		expect(s1.attachmentsSent).toBe(0);
+		expect(t.uploadCalls).toEqual([]);
+		for (const n of t.pushedNotes()) {
+			expect('attachments' in n).toBe(false);
+			expect(n.content_hash).toBe(sha256Hex(n.body_md));
+		}
+
+		t.supported = true;
+		t.reset();
+		await m.runSync();
+		expect(t.pushedNotes().map((n) => n.vault_path)).toEqual(['a.md']);
+		expect(t.uploadCalls).toHaveLength(1);
+
+		t.reset();
+		await m.runSync();
+		expect(t.pushedNotes()).toEqual([]);
+	});
+
+	it('an upload failure never blocks notes and the next run uploads only what is missing', async () => {
+		const t = new FakeServer();
+		t.uploadScript = [null, uploadFailure(0, 'net::ERR_CONNECTION_RESET'), null];
+		const [x, y, z] = [bytes('x'), bytes('y'), bytes('z')];
+		const vault = new FakeVault()
+			.note('a.md', 'x', [embed('x.png'), embed('y.png'), embed('z.png')])
+			.file('att/x.png', x).file('att/y.png', y).file('att/z.png', z);
+		const m = mgr(t, vault);
+		const s1 = await m.runSync();
+		expect(s1.ok).toBe(true);
+		expect(t.pushedNotes().map((n) => n.vault_path)).toEqual(['a.md']);
+		expect(store.attachmentIssues).toEqual([{ path: 'att/y.png', reason: 'upload-failed', size: 1 }]);
+
+		t.reset();
+		const s2 = await m.runSync();
+		expect(t.pushedNotes()).toEqual([]);
+		expect(t.uploadCalls.map((u) => u.sha256)).toEqual([shaOf(y)]);
+		expect(store.attachmentIssues).toEqual([]);
+		expect(s2.attachmentsSent).toBe(1);
+	});
+
+	it('a note indexed late re-pushes once with its attachments', async () => {
+		const t = new FakeServer();
+		const vault = new FakeVault().note('a.md', '![[chart.png]]', null).file('att/chart.png', B);
+		const m = mgr(t, vault);
+		await m.runSync();
+		const first = t.pushedNotes()[0]!;
+		expect('attachments' in first).toBe(false); // omitted, not []
+		expect(first.content_hash).toBe(sha256Hex('![[chart.png]]'));
+
+		vault.refs['a.md'] = [embed('chart.png')];
+		t.reset();
+		await m.runSync();
+		expect(t.pushedNotes().map((n) => n.attachments)).toEqual([[
+			{ original: '![[chart.png]]', embed: true, path: 'att/chart.png', size: B.byteLength, sha256: shaOf(B), status: 'ok' },
+		]]);
+
+		t.reset();
+		await m.runSync();
+		expect(t.pushedNotes()).toEqual([]);
+	});
+
+	it('an unindexed note whose last push carried refs is deferred, never pushed without its list', async () => {
+		const t = new FakeServer();
+		const vault = new FakeVault().note('a.md', '![[chart.png]]', [embed('chart.png')]).file('att/chart.png', B);
+		const m = mgr(t, vault);
+		await m.runSync();
+		expect(t.pushedNotes()[0]!.attachments).toHaveLength(1);
+		const firstHash = store.files['a.md']!.hash;
+
+		// edited, and Obsidian has not re-indexed it yet: deferred, not pushed list-less
+		vault.notes['a.md'] = '![[chart.png]] edited';
+		vault.refs['a.md'] = null;
+		t.reset();
+		const s = await m.runSync();
+		expect(s.ok).toBe(true);
+		expect(t.pushedNotes()).toEqual([]);
+		expect(store.files['a.md']!.hash).toBe(firstHash);
+		expect(t.ingestCalls.find((c) => c.final === true)!.manifest).toEqual(['a.md']); // still staged
+
+		// indexed again: pushed once, with its list and the new body
+		vault.refs['a.md'] = [embed('chart.png')];
+		t.reset();
+		await m.runSync();
+		expect(t.pushedNotes().map((n) => [n.body_md, n.attachments?.length])).toEqual([['![[chart.png]] edited', 1]]);
+		t.reset();
+		await m.runSync();
+		expect(t.pushedNotes()).toEqual([]);
+	});
+
+	it('a deferral is visible and bounded: after 3 deferred runs the text goes out without its list (N1)', async () => {
+		const t = new FakeServer();
+		const vault = new FakeVault().note('a.md', '![[chart.png]]', [embed('chart.png')]).file('att/chart.png', B);
+		await mgr(t, vault).runSync();
+		vault.notes['a.md'] = '![[chart.png]] edited';
+		vault.refs['a.md'] = null;
+		const waiting = { path: 'a.md', reason: 'waiting-for-index', size: 0 };
+		const pushedBare = { path: 'a.md', reason: 'pushed-without-files', size: 0 };
+
+		for (let run = 1; run <= 3; run++) {
+			t.reset();
+			// a fresh manager each run: the counter survives a restart (it lives in saved data)
+			const s = await mgr(t, vault).runSync();
+			expect(s.ok).toBe(true);
+			expect(t.pushedNotes()).toEqual([]);
+			expect(store.attachmentIssues).toContainEqual(waiting);
+			expect(store.files['a.md']!.deferredRuns).toBe(run);
+		}
+		// the 4th run pushes the text without the list, and says so
+		t.reset();
+		await mgr(t, vault).runSync();
+		expect(t.pushedNotes().map((n) => [n.body_md, 'attachments' in n])).toEqual([['![[chart.png]] edited', false]]);
+		expect(store.attachmentIssues).toContainEqual(pushedBare);
+		expect(store.attachmentIssues).not.toContainEqual(waiting);
+		// still unindexed: nothing re-pushed, the issue stays
+		t.reset();
+		await mgr(t, vault).runSync();
+		expect(t.pushedNotes()).toEqual([]);
+		expect(store.attachmentIssues).toContainEqual(pushedBare);
+		// indexed: pushed with its list, issue gone, counter reset
+		vault.refs['a.md'] = [embed('chart.png')];
+		t.reset();
+		await mgr(t, vault).runSync();
+		expect(t.pushedNotes()[0]!.attachments).toHaveLength(1);
+		expect(store.attachmentIssues).toEqual([]);
+		expect(store.files['a.md']!.deferredRuns).toBeUndefined();
+	});
+
+	it('too-large, missing and storage-limit refs are sent with their status and never uploaded', async () => {
+		const t = new FakeServer();
+		t.maxBytes = 4;
+		const vault = new FakeVault()
+			.note('a.md', 'x', [embed('big.png'), embed('gone.pdf')])
+			.file('att/big.png', B);
+		const s = await mgr(t, vault).runSync();
+		expect(t.uploadCalls).toEqual([]);
+		expect(t.pushedNotes()[0]!.attachments!.map((r) => r.status)).toEqual(['too-large', 'missing']);
+		expect(s.attachmentIssues).toBe(2);
+
+		const t2 = new FakeServer();
+		t2.remainingBytes = 1;
+		const v2 = new FakeVault().note('a.md', 'x', [embed('c.png')]).file('att/c.png', B);
+		await mgr(t2, v2, makeData()).runSync();
+		expect(t2.uploadCalls).toEqual([]);
+		expect(t2.pushedNotes()[0]!.attachments![0]).toMatchObject({ status: 'storage-limit', sha256: shaOf(B) });
+	});
+
+	it('a 413 storage-full stops further uploads in the run', async () => {
+		const t = new FakeServer();
+		t.uploadScript = [uploadFailure(413, 'Your UCT storage for imported files is full.', { storageFull: true })];
+		const vault = new FakeVault()
+			.note('a.md', 'x', [embed('p.png'), embed('q.png')])
+			.file('att/p.png', bytes('p')).file('att/q.png', bytes('q'));
+		const s = await mgr(t, vault).runSync();
+		expect(s.ok).toBe(true);
+		expect(t.uploadCalls).toHaveLength(1);
+		expect(t.pushedNotes()[0]!.attachments!.map((r) => r.status)).toEqual(['storage-limit', 'storage-limit']);
+	});
+
+	it('turning attachment sync off sends status off and uploads nothing; turning it back on re-sends', async () => {
+		const t = new FakeServer();
+		const vault = new FakeVault().note('a.md', '![[chart.png]]', [embed('chart.png')]).file('att/chart.png', B);
+		const m = mgr(t, vault, makeData({ syncAttachments: false }));
+		await m.runSync();
+		expect(t.uploadCalls).toEqual([]);
+		expect(t.pushedNotes()[0]!.attachments).toEqual([
+			{ original: '![[chart.png]]', embed: true, path: 'att/chart.png', size: B.byteLength, sha256: null, status: 'off' },
+		]);
+
+		store.syncAttachments = true;
+		t.reset();
+		await m.runSync();
+		expect(t.uploadCalls).toHaveLength(1);
+		expect(t.pushedNotes()[0]!.attachments![0]!.status).toBe('ok');
+	});
+
+	it('a 401 on check or upload clears the token and reports needsReconnect', async () => {
+		const vault = new FakeVault().note('a.md', '![[chart.png]]', [embed('chart.png')]).file('att/chart.png', B);
+		const t1 = new FakeServer();
+		t1.checkScript = [{ ok: false, status: 401, message: 'Not authenticated', authExpired: true }];
+		const s1 = await mgr(t1, vault, makeData()).runSync();
+		expect(s1).toMatchObject({ ok: false, needsReconnect: true });
+		expect(store.deviceToken).toBeNull();
+		expect(t1.ingestCalls).toEqual([]);
+
+		const t2 = new FakeServer();
+		t2.uploadScript = [uploadFailure(401, 'Not authenticated', { authExpired: true })];
+		const s2 = await mgr(t2, vault, makeData()).runSync();
+		expect(s2).toMatchObject({ ok: false, needsReconnect: true });
+		expect(store.deviceToken).toBeNull();
+		expect(t2.ingestCalls).toEqual([]);
+	});
+
+	it('a transient probe failure after a good run re-pushes nothing (no flip to a list-less push)', async () => {
+		const t = new FakeServer();
+		const vault = new FakeVault()
+			.note('a.md', '![[chart.png]]', [embed('chart.png')])
+			.note('b.md', '# plain', [])
+			.file('att/chart.png', B);
+		const m = mgr(t, vault);
+		await m.runSync();
+		expect(t.pushedNotes()).toHaveLength(2);
+
+		t.reset();
+		t.checkScript = [{ ok: false, status: 503, message: 'Service Unavailable', authExpired: false }];
+		const s = await m.runSync();
+		expect(s.ok).toBe(true);
+		expect(t.pushedNotes()).toEqual([]);
+		expect(t.uploadCalls).toEqual([]);
+	});
+
+	it('pushes the note text once the upload budget is spent; later runs finish the uploads (I3)', async () => {
+		const t = new FakeServer();
+		const vault = new FakeVault();
+		const refs = [];
+		for (let i = 0; i < 4; i++) {
+			vault.file(`att/f${i}.png`, bytes(`blob ${i}`));
+			refs.push(embed(`f${i}.png`));
+		}
+		vault.note('a.md', 'images', refs);
+		let now = 0;
+		t.onUpload = () => { now += 30_000; };
+		const m = new SyncManager({
+			transport: t, vaultSource: vault, getData: () => store,
+			saveData: async (d) => { store = JSON.parse(JSON.stringify(d)) as PluginData; },
+			clock: () => now,
+		});
+		const s1 = await m.runSync();
+		expect(s1.ok).toBe(true);
+		expect(t.uploadCalls).toHaveLength(2); // 60 s budget at 30 s each
+		expect(t.pushedNotes().map((n) => n.vault_path)).toEqual(['a.md']); // text went out
+		expect(t.pushedNotes()[0]!.attachments!.every((r) => r.status === 'ok')).toBe(true);
+
+		t.reset();
+		const s2 = await m.runSync();
+		expect(t.uploadCalls).toHaveLength(2);
+		expect(t.pushedNotes()).toEqual([]); // the note did not change
+		expect(s2.attachmentsSent).toBe(2);
+
+		t.reset();
+		await m.runSync();
+		expect(t.uploadCalls).toEqual([]);
+	});
+
+	it('a note whose refs would push it past the 2 MB ingest cap goes alone, else without refs and with an issue (M3)', async () => {
+		const t = new FakeServer();
+		const missingRefs = (n: number) => Array.from({ length: n }, (_, i) =>
+			embed(`missing-file-with-a-fairly-long-name-${'x'.repeat(60)}-${i}.png`));
+		const vault = new FakeVault()
+			.note('fits.md', 'f'.repeat(1_700_000), missingRefs(10)) // over the 1.5 MB batch budget, under 2 MB
+			.note('over.md', 'o'.repeat(1_950_000), missingRefs(1000)) // body fits, body + refs does not
+			.note('small.md', '# small', []);
+		const m = mgr(t, vault);
+		const s = await m.runSync();
+		expect(s.ok).toBe(true);
+		const batches = t.ingestCalls.filter((c) => c.final !== true).map((c) => c.notes.map((n) => n.vault_path));
+		expect(batches).toContainEqual(['fits.md']);
+		expect(batches).toContainEqual(['over.md']);
+		const notes = t.pushedNotes();
+		expect(notes.find((n) => n.vault_path === 'fits.md')!.attachments).toHaveLength(10);
+		const over = notes.find((n) => n.vault_path === 'over.md')!;
+		expect('attachments' in over).toBe(false);
+		expect(over.content_hash).toBe(sha256Hex(over.body_md));
+		for (const c of t.ingestCalls) {
+			const body = JSON.stringify({ consent: true, notes: c.notes, manifest: c.manifest, final: c.final });
+			expect(new TextEncoder().encode(body).length).toBeLessThanOrEqual(2_000_000);
+		}
+		expect(store.attachmentIssues).toContainEqual({ path: 'over.md', reason: 'note-too-large-for-files', size: 0 });
+
+		t.reset();
+		await m.runSync();
+		expect(t.pushedNotes()).toEqual([]); // stable: no re-push every run
+	});
+
+	it('a note whose body alone is over the 2 MB ingest cap is skipped and listed; every other note still syncs', async () => {
+		const t = new FakeServer();
+		const vault = new FakeVault()
+			.note('huge.md', 'h'.repeat(2_100_000), [])
+			.note('a.md', '# a', []);
+		const m = mgr(t, vault);
+		const s1 = await m.runSync();
+		expect(s1.ok).toBe(true);
+		expect(t.pushedNotes().map((n) => n.vault_path)).toEqual(['a.md']);
+		expect(s1.tooLarge).toEqual(['huge.md']);
+		expect(s1.skippedUnchanged).toBe(0); // N3: counted as too large, never as "unchanged"
+		expect(store.files['huge.md']).toMatchObject({ tooLarge: true }); // listed in Settings
+		const final1 = t.ingestCalls.find((c) => c.final === true)!;
+		expect(final1.manifest).toEqual(['a.md']); // never staged, so never manifested
+		for (const c of t.ingestCalls) {
+			const body = JSON.stringify({ consent: true, notes: c.notes, manifest: c.manifest, final: c.final });
+			expect(new TextEncoder().encode(body).length).toBeLessThanOrEqual(2_000_000);
+		}
+
+		// every later run still syncs the rest; the huge note is not retried while unchanged
+		vault.notes['a.md'] = '# a, edited';
+		t.reset();
+		const s2 = await m.runSync();
+		expect(s2.ok).toBe(true);
+		expect(t.pushedNotes().map((n) => n.vault_path)).toEqual(['a.md']);
+		expect(s2.skippedTooLargeUnchanged).toEqual(['huge.md']);
+
+		// shortened: retried and pushed
+		vault.notes['huge.md'] = '# now small';
+		t.reset();
+		await m.runSync();
+		expect(t.pushedNotes().map((n) => n.vault_path)).toEqual(['huge.md']);
+		expect(store.files['huge.md']!.tooLarge).toBe(false);
+	});
+
+	it('a hashing budget cut pushes the text now and the lists next run; a note that had refs is held (I2)', async () => {
+		const t = new FakeServer();
+		const vault = new FakeVault()
+			.note('a.md', '![[p.png]]', [embed('p.png')])
+			.note('b.md', '![[q.png]]', [embed('q.png')])
+			.file('att/p.png', bytes('p')).file('att/q.png', bytes('q'));
+		let now = 0;
+		vault.onRead = () => { now += 61_000; }; // one read spends the whole 60 s budget
+		const m = new SyncManager({
+			transport: t, vaultSource: vault, getData: () => store,
+			saveData: async (d) => { store = JSON.parse(JSON.stringify(d)) as PluginData; },
+			clock: () => now,
+		});
+		const s1 = await m.runSync();
+		expect(s1.ok).toBe(true);
+		const pushed1 = t.pushedNotes();
+		expect(pushed1.map((n) => n.vault_path)).toEqual(['a.md', 'b.md']); // all text went out
+		expect(pushed1.find((n) => n.vault_path === 'b.md')!.attachments).toBeUndefined();
+
+		t.reset();
+		await m.runSync();
+		expect(t.pushedNotes().map((n) => [n.vault_path, n.attachments?.length])).toEqual([['b.md', 1]]);
+
+		// a note that already went out WITH refs is held, not pushed list-less, when cut
+		vault.notes['a.md'] = '![[p.png]] edited';
+		vault.file('att/p.png', bytes('P'), 2); // changed: needs a fresh hash
+		vault.notes['b.md'] = '![[q.png]] edited';
+		vault.file('att/q.png', bytes('Q'), 2);
+		t.reset();
+		await m.runSync();
+		const pushed3 = t.pushedNotes();
+		expect(pushed3.map((n) => n.vault_path)).toEqual(['a.md']); // b was cut and is held
+		expect(store.attachmentIssues.filter((i) => i.reason === 'waiting-for-index')).toEqual([]);
+	});
+
+	it('consent: the first attachment run pushes the notes with their refs and uploads nothing; run 2 uploads', async () => {
+		const t = new FakeServer();
+		const vault = new FakeVault().note('a.md', '![[chart.png]]', [embed('chart.png')]).file('att/chart.png', B);
+		const notices: string[] = [];
+		store = makeData({ attachmentsNoticeShown: false });
+		const m = new SyncManager({
+			transport: t, vaultSource: vault, getData: () => store,
+			saveData: async (d) => { store = JSON.parse(JSON.stringify(d)) as PluginData; },
+			onProgress: (msg) => notices.push(msg),
+		});
+		const s1 = await m.runSync();
+		expect(s1.ok).toBe(true);
+		expect(notices).toHaveLength(1);
+		expect(t.uploadCalls).toEqual([]);
+		// the text goes out WITHOUT a file list, at the 0.1.x hash: nothing about files
+		// has left the device before the member saw the notice
+		const first = t.pushedNotes()[0]!;
+		expect('attachments' in first).toBe(false);
+		expect(first.content_hash).toBe(sha256Hex('![[chart.png]]'));
+		expect(store.attachmentsNoticeShown).toBe(true); // survives a restart
+
+		t.reset();
+		const restarted = new SyncManager({
+			transport: t, vaultSource: vault, getData: () => store,
+			saveData: async (d) => { store = JSON.parse(JSON.stringify(d)) as PluginData; },
+			onProgress: (msg) => notices.push(msg),
+		});
+		const s2 = await restarted.runSync();
+		expect(t.uploadCalls).toHaveLength(1);
+		expect(s2.attachmentsSent).toBe(1);
+		expect(notices).toHaveLength(1);
+		// re-pushed once, now with its list
+		expect(t.pushedNotes().map((n) => n.attachments?.length)).toEqual([1]);
+	});
+
+	it('consent run: a note whose last push had a list (sync was off) is held, never pushed list-less', async () => {
+		const t = new FakeServer();
+		const vault = new FakeVault().note('a.md', '![[chart.png]]', [embed('chart.png')]).file('att/chart.png', B);
+		store = makeData({ attachmentsNoticeShown: false, syncAttachments: false });
+		const m = mgr(t, vault);
+		await m.runSync(); // toggle off: `off` refs, no notice
+		expect(t.pushedNotes()[0]!.attachments![0]!.status).toBe('off');
+		store.syncAttachments = true;
+		t.reset();
+		await m.runSync(); // the consent run
+		expect(t.pushedNotes()).toEqual([]);
+		expect(t.uploadCalls).toEqual([]);
+	});
+
+	it('settings edited during a run do not change that run (final review M4)', async () => {
+		const t = new FakeServer();
+		const vault = new FakeVault()
+			.note('a.md', 'x', [embed('p.png'), embed('q.png')])
+			.file('att/p.png', bytes('p')).file('att/q.png', bytes('q'));
+		const original = store.serverUrl;
+		vault.onRead = () => { store.syncAttachments = false; store.serverUrl = 'https://elsewhere.example'; };
+		await mgr(t, vault).runSync();
+		expect(t.pushedNotes()[0]!.attachments!.map((r) => r.status)).toEqual(['ok', 'ok']); // never mixed
+		for (const c of t.ingestCalls) expect(c.serverUrl).toBe(original);
+	});
+
+	it('a 403 on upload stops uploads but the notes are still pushed', async () => {
+		const t = new FakeServer();
+		t.uploadScript = [uploadFailure(403, 'Upgrade required')];
+		const vault = new FakeVault()
+			.note('a.md', 'x', [embed('p.png'), embed('q.png')])
+			.file('att/p.png', bytes('p')).file('att/q.png', bytes('q'));
+		const s = await mgr(t, vault).runSync();
+		expect(s.ok).toBe(true);
+		expect(t.uploadCalls).toHaveLength(1);
+		expect(t.pushedNotes().map((n) => n.vault_path)).toEqual(['a.md']);
+		expect(store.attachmentIssues).toEqual([{ path: 'att/p.png', reason: 'upload-failed', size: 1, message: 'Upgrade required' }]);
+	});
+
+	it('attachment hash cache: unchanged mtime+size never re-reads the binary', async () => {
+		const t = new FakeServer();
+		const vault = new FakeVault().note('a.md', '![[chart.png]]', [embed('chart.png')]).file('att/chart.png', B);
+		const m = mgr(t, vault);
+		await m.runSync();
+		expect(vault.readBinaryCalls).toContain('att/chart.png'); // the first run did hash it
+		vault.readBinaryCalls = [];
+		await m.runSync();
+		expect(vault.readBinaryCalls).toEqual([]);
+		expect(t.checkCalls.at(-1)).toEqual([shaOf(B)]); // still checked, from the cached hash
+	});
+
+	it('the manifest never names an attachment path', async () => {
+		const t = new FakeServer();
+		const vault = new FakeVault()
+			.note('a.md', '![[chart.png]]', [embed('chart.png')])
+			.note('b.md', '# b', [])
+			.file('att/chart.png', B);
+		await mgr(t, vault).runSync();
+		expect(t.uploadCalls).toHaveLength(1);
+		const final = t.ingestCalls.find((c) => c.final === true)!;
+		expect([...final.manifest!].sort()).toEqual(['a.md', 'b.md']);
 	});
 });

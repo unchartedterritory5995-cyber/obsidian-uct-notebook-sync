@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { sha256Hex } from '../hashing';
+import { sha256Hex, sha256HexBytes } from '../hashing';
+
+describe('sha256HexBytes', () => {
+	it('sha256HexBytes matches sha256Hex for the same UTF-8 bytes', () => {
+		for (const s of ['', 'abc', 'Ünïcode chart #1 (v2)\n']) {
+			const bytes = new TextEncoder().encode(s);
+			const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+			expect(sha256HexBytes(buf)).toBe(sha256Hex(s));
+		}
+	});
+});
 
 // Ground-truth vectors computed independently via `node -e
 // "require('crypto').createHash('sha256').update(X).digest('hex')"` on this

@@ -1,0 +1,406 @@
+/**
+ * Phase 0 of a sync (plugin 0.2.0): find the images and files each note uses, upload
+ * the blobs the server lacks, and give every note its attachment refs.
+ *
+ * Contract: api/routers/note_sync.py (`/obsidian/attachments/check`, `PUT
+ * /obsidian/attachments/{sha256}`, `ObsidianAttachmentRef`) and
+ * providers/obsidian.py, which turns each ref's `original` into the image, file chip
+ * or notice.
+ *
+ * Nothing here fails a sync except an expired token. A server without attachment
+ * support, or a check that fails, makes the run text-only exactly as 0.1.x was
+ * (`null` refs: no `attachments` field, and the 0.1.x content hash).
+ */
+import type { Transport } from './api-client';
+import { classifyRef, mimeForExtension } from './attachment-refs';
+import { sha256HexBytes } from './hashing';
+import type { VaultSource } from './sync-manager';
+import type { AttachmentIssue, NoteAttachmentRef, PluginData } from './types';
+
+/** How long a sync waits for Obsidian to index the vault before going on. */
+export const METADATA_WAIT_MS = 15000;
+/** Hashes per check request (the server takes up to 5000). */
+export const CHECK_CHUNK = 1000;
+/** `ObsidianAttachmentRef` bounds in note_sync.py, in code points (Python `len`). A
+ * ref over them would make the server refuse the WHOLE ingest batch, so it is not
+ * sent; its original stays in the note as the member wrote it. */
+export const MAX_ORIGINAL_CHARS = 2048;
+export const MAX_PATH_CHARS = 1024;
+/** `_MAX_ATTACHMENTS_PER_NOTE`'s value when the server does not advertise its own
+ * `maxRefsPerNote` in the check answer: refs past the cap are not sent. */
+export const DEFAULT_MAX_REFS_PER_NOTE = 5000;
+
+/**
+ * A run uploads for at most this long, or this many bytes, then the note text goes
+ * out; the rest of the blobs upload on later runs (review I3). Their refs stay `ok`:
+ * the server shows "retrying" and re-lists each note once its blob arrives
+ * (`_media_retry_rows`), so the first 0.2.0 sync of a large vault pushes its text in
+ * about a minute instead of after every upload.
+ */
+/** 429 (upload gate) and 503 (volume full / not configured): the server is busy. */
+const BUSY_STATUSES: ReadonlySet<number> = new Set([429, 503]);
+/** Consecutive busy runs before Settings shows a "server busy" issue. */
+export const BUSY_RUNS_FOR_ISSUE = 3;
+
+/**
+ * Hashing is budgeted like uploads (final review I2): the first 0.2.0 run of a vault
+ * with GBs of attachments on a slow or on-demand disk could otherwise spend minutes
+ * reading before any text goes out, and lose it all if Obsidian is closed. A run hashes
+ * for at most HASH_BUDGET_MS; notes it did not reach are `pending` (their text is pushed
+ * without a list, or held if their last push had one) and the next run carries on. The
+ * cache is saved every SAVE_EVERY_HASHES files, so an interrupted run loses seconds.
+ */
+export const HASH_BUDGET_MS = 60_000;
+export const SAVE_EVERY_HASHES = 200;
+/** Files hashed in one run before the one-time "preparing" notice. */
+export const PROGRESS_NOTICE_AFTER = 100;
+export const PREPARING_MESSAGE = 'UCT Notebook Sync: preparing the images and files your notes use…';
+
+export const ATTACHMENTS_NOTICE =
+	'UCT Notebook Sync will now also sync the images and files your notes use — turn this off in Settings.';
+
+export const UPLOAD_BUDGET_MS = 60_000;
+export const UPLOAD_BUDGET_BYTES = 100 * 1024 * 1024;
+
+export interface PrepareDeps {
+	transport: Transport;
+	vaultSource: VaultSource;
+	data: PluginData;
+	serverUrl: string;
+	token: string;
+	/** Milliseconds; injectable for tests. Default `Date.now`. */
+	clock?: () => number;
+	uploadBudget?: { ms: number; bytes: number };
+	/** How long a run may spend hashing files before it pushes the text (default
+	 * HASH_BUDGET_MS). */
+	hashBudgetMs?: number;
+	/** Persist `data` (the hash cache) mid-run, every SAVE_EVERY_HASHES files hashed. */
+	saveProgress?: () => Promise<void>;
+	/** Shown once when a run has many files to prepare. */
+	onProgress?: (message: string) => void;
+	/** The "Sync images and files" toggle as the run read it at its start. */
+	syncAttachments?: boolean;
+	/** True once the plugin is unloading: hashing and uploads stop (final review M3). */
+	shouldStop?: () => boolean;
+}
+
+export interface PrepareResult {
+	supported: boolean;
+	/** Per note: its refs, or `null` to send none (field omitted). */
+	refsByNote: Map<string, NoteAttachmentRef[] | null>;
+	/** Blobs uploaded this run. */
+	sent: number;
+	issues: AttachmentIssue[];
+	authExpired: boolean;
+	failMessage?: string;
+	/** Notes the hashing budget did not reach this run (their refs are `null`). */
+	pending: Set<string>;
+}
+
+function codePoints(s: string): number {
+	return Array.from(s).length;
+}
+
+/** Long loops give the UI thread a turn this often (iterations), so a big vault never
+ * freezes Obsidian (final review I1, M5). A macrotask, not a microtask: only a
+ * macrotask lets rendering and input run. */
+export const YIELD_EVERY = 500;
+function yieldToUi(): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+export async function prepareAttachments(deps: PrepareDeps, notePaths: string[]): Promise<PrepareResult> {
+	const { transport, vaultSource, data, serverUrl, token } = deps;
+	// the run's snapshot of the toggle (final review M4); the live value otherwise
+	const syncOn = deps.syncAttachments ?? data.syncAttachments;
+	const legacy = (): PrepareResult => ({
+		supported: false,
+		refsByNote: new Map(notePaths.map((p) => [p, null])),
+		sent: 0,
+		issues: [],
+		authExpired: false,
+		pending: new Set<string>(),
+	});
+
+	// 1. Does this server speak attachments, and what are its limits?
+	// ⛔ Only the server SAYING "no attachments" (404/405, a non-protocol 2xx) means
+	// legacy. A transient failure (403, 429, 5xx, network) keeps the last run's answer:
+	// flipping a supported vault to legacy for one run would re-push every attachment
+	// note without its list, show "unavailable" notices across the notebook, let the
+	// final push GC its blobs, and re-push and re-upload it all the run after (review
+	// I2). So an "offline" run builds the same refs from the vault and the hash cache,
+	// keeping every hash stable, and uploads nothing: the server shows "retrying".
+	const probe = await transport.checkAttachments({ serverUrl, token, sha256: [] });
+	let offline = false;
+	let probeBusy = false;
+	let maxBytes: number;
+	let remainingBytes: number;
+	let maxRefs: number;
+	if (!probe.ok) {
+		if (probe.authExpired) return { ...legacy(), authExpired: true, failMessage: probe.message };
+		if (data.attachmentServer === null) return legacy();
+		offline = true;
+		probeBusy = BUSY_STATUSES.has(probe.status);
+		maxBytes = data.attachmentServer.maxBytes;
+		maxRefs = data.attachmentServer.maxRefsPerNote ?? DEFAULT_MAX_REFS_PER_NOTE;
+		remainingBytes = Number.POSITIVE_INFINITY;
+	} else if (!probe.supported) {
+		data.attachmentServer = null;
+		return legacy();
+	} else {
+		maxBytes = probe.maxBytes;
+		maxRefs = probe.maxRefsPerNote ?? DEFAULT_MAX_REFS_PER_NOTE;
+		remainingBytes = probe.remainingBytes;
+		data.attachmentServer = { maxBytes, maxRefsPerNote: maxRefs };
+	}
+
+	// Consent (ruled): members who connected under 0.1.x agreed to note text. The first
+	// run that would send files TELLS them, and NOTHING about files leaves the device on
+	// that run: no list, no check, no upload, not even a read. Every note is `pending`,
+	// so its text goes out at the 0.1.x hash (or, if its last push carried a list, it is
+	// held). The next run builds the lists and uploads, unless the member has turned
+	// "Sync images and files" off by then. The flag is saved with the plugin data, so
+	// this happens once.
+	if (!offline && syncOn && !data.attachmentsNoticeShown) {
+		deps.onProgress?.(ATTACHMENTS_NOTICE);
+		data.attachmentsNoticeShown = true;
+		return { ...legacy(), supported: true, pending: new Set(notePaths) };
+	}
+
+	// 2. Obsidian's link index.
+	await vaultSource.whenMetadataReady(METADATA_WAIT_MS);
+
+	// 3. Each note's refs.
+	const refsByNote = new Map<string, NoteAttachmentRef[] | null>();
+	const issues: AttachmentIssue[] = [];
+	const issueKeys = new Set<string>();
+	const addIssue = (issue: AttachmentIssue): void => {
+		const key = `${issue.reason}\u0000${issue.path}`;
+		if (issueKeys.has(key)) return;
+		issueKeys.add(key);
+		issues.push(issue);
+	};
+	const hashes: PluginData['attachmentHashes'] = {};
+	/** sha256 -> the first file that has it (the one uploaded). */
+	const firstFile = new Map<string, { path: string; size: number; extension: string }>();
+	let steps = 0;
+	const step = async (): Promise<void> => {
+		if (++steps % YIELD_EVERY === 0) await yieldToUi();
+	};
+	const clock = deps.clock ?? Date.now;
+	const hashStarted = clock();
+	const hashBudgetMs = deps.hashBudgetMs ?? HASH_BUDGET_MS;
+	const pending = new Set<string>();
+	let hashed = 0;
+
+	notes: for (const notePath of notePaths) {
+		await step();
+		// ⛔ A note Obsidian has not indexed yet sends NO list (null), never `[]`: `[]`
+		// would tell the server "this note uses no files", and its hash would match a
+		// later indexed run with no refs. Its re-push with refs replaces it.
+		if (!vaultSource.isIndexed(notePath)) {
+			refsByNote.set(notePath, null);
+			continue;
+		}
+		const refs: NoteAttachmentRef[] = [];
+		let overflow = false;
+		for (const raw of vaultSource.listRawRefs(notePath)) {
+			await step();
+			const c = classifyRef(raw, vaultSource.resolveRef(raw, notePath));
+			if (c.kind === 'skip') continue;
+			// ⛔ A ref the server model would refuse (`original` over 2048, `path` over
+			// 1024 code points) cannot be sent at all, and the server cannot show a
+			// notice for a ref it never received: a Settings issue is the only visible
+			// signal, so it is never dropped silently (review I1).
+			const refPath = c.kind === 'missing' ? c.ref.path : c.file.path;
+			if (codePoints(raw.original) > MAX_ORIGINAL_CHARS) {
+				addIssue({ path: raw.linkpath || raw.original, reason: 'link-too-long', size: 0 });
+				continue;
+			}
+			if (codePoints(refPath) > MAX_PATH_CHARS) {
+				addIssue({ path: refPath, reason: 'link-too-long', size: 0 });
+				continue;
+			}
+			if (refs.length >= maxRefs) {
+				overflow = true; // the first N are sent (never a 400 for the batch); ONE issue for the rest
+				continue;
+			}
+			if (c.kind === 'missing') {
+				refs.push(c.ref);
+				addIssue({ path: c.ref.path, reason: 'missing', size: 0 });
+				continue;
+			}
+			const { file } = c;
+			const base = { original: raw.original, embed: raw.embed, path: file.path, size: file.size };
+			if (!syncOn) {
+				refs.push({ ...base, sha256: null, status: 'off' });
+				// Keep a referenced file's cache entry while sync is off, so turning it
+				// back on does not re-read every binary (review M2).
+				const kept = data.attachmentHashes[file.path];
+				if (kept) hashes[file.path] = kept;
+				continue;
+			}
+			if (file.size > maxBytes) {
+				refs.push({ ...base, sha256: null, status: 'too-large' });
+				addIssue({ path: file.path, reason: 'too-large', size: file.size, limit: maxBytes });
+				continue;
+			}
+			let sha = hashes[file.path]?.sha256;
+			if (sha === undefined) {
+				const cached = data.attachmentHashes[file.path];
+				if (cached && cached.mtime === file.mtime && cached.size === file.size) {
+					sha = cached.sha256;
+				} else {
+					if (clock() - hashStarted >= hashBudgetMs || deps.shouldStop?.()) {
+						// out of hashing time: this note waits for the next run
+						pending.add(notePath);
+						refsByNote.set(notePath, null);
+						continue notes;
+					}
+					try {
+						sha = sha256HexBytes(await vaultSource.readBinary(file.path));
+					} catch {
+						// gone between the index and the read: the file is not in the vault
+						refs.push({ ...base, size: 0, sha256: null, status: 'missing' });
+						addIssue({ path: file.path, reason: 'missing', size: 0 });
+						continue;
+					}
+					// into the live cache at once, so a mid-run save keeps it
+					data.attachmentHashes[file.path] = { mtime: file.mtime, size: file.size, sha256: sha };
+					hashed += 1;
+					if (hashed === PROGRESS_NOTICE_AFTER) deps.onProgress?.(PREPARING_MESSAGE);
+					if (hashed % SAVE_EVERY_HASHES === 0) await deps.saveProgress?.();
+				}
+				hashes[file.path] = { mtime: file.mtime, size: file.size, sha256: sha };
+			}
+			refs.push({ ...base, sha256: sha, status: 'ok' });
+			if (!firstFile.has(sha)) firstFile.set(sha, { path: file.path, size: file.size, extension: file.extension });
+		}
+		if (overflow) addIssue({ path: notePath, reason: 'too-many-files', size: 0, limit: maxRefs });
+		refsByNote.set(notePath, refs);
+	}
+	// Only paths referenced this run keep a cache entry: but only on a run that reached
+	// every note. A budget-cut run did not see the pending notes' files, so it collects
+	// nothing (their entries, and the ones it just hashed, all stay).
+	if (pending.size === 0) data.attachmentHashes = hashes;
+	else data.attachmentHashes = { ...data.attachmentHashes, ...hashes };
+
+	const result: PrepareResult = { supported: true, refsByNote, sent: 0, issues, authExpired: false, pending };
+	// A server too busy to take blobs (429/503) is only "retrying" in the note. After
+	// BUSY_RUNS_FOR_ISSUE runs in a row it is also a Settings issue (review M4); any
+	// run that is not busy resets the count.
+	// Likewise an offline run for any OTHER reason (a 403, a 500, the network): never
+	// silent forever. Its own count and issue, so one cause never shows two (final
+	// review I4).
+	const settle = (busy: boolean, checkFailing = false): PrepareResult => {
+		data.attachmentBusyRuns = busy ? data.attachmentBusyRuns + 1 : 0;
+		data.attachmentCheckFailRuns = checkFailing ? data.attachmentCheckFailRuns + 1 : 0;
+		if (data.attachmentBusyRuns >= BUSY_RUNS_FOR_ISSUE) addIssue({ path: '', reason: 'server-busy', size: 0 });
+		if (data.attachmentCheckFailRuns >= BUSY_RUNS_FOR_ISSUE) addIssue({ path: '', reason: 'check-failing', size: 0 });
+		return result;
+	};
+	if (offline) return settle(probeBusy, !probeBusy);
+	// sha -> its `ok` refs, built once: marking a blob storage-limit touches only that
+	// blob's refs. ⚰️ It flattened every ref of every note on each call, so a 413 on a
+	// 5k-blob, 30k-ref vault blocked the UI for ~3 s (final review I1).
+	const refsBySha = new Map<string, NoteAttachmentRef[]>();
+	for (const refs of refsByNote.values()) {
+		for (const r of refs ?? []) {
+			if (r.status !== 'ok' || r.sha256 === null) continue;
+			const list = refsBySha.get(r.sha256);
+			if (list) list.push(r);
+			else refsBySha.set(r.sha256, [r]);
+		}
+	}
+	const markStorageLimit = (sha: string): void => {
+		for (const r of refsBySha.get(sha) ?? []) {
+			if (r.status === 'ok') {
+				r.status = 'storage-limit';
+				addIssue({ path: r.path, reason: 'storage-limit', size: r.size });
+			}
+		}
+	};
+
+	// 4. Which blobs does the server lack? Every `ok` hash of EVERY note, not only the
+	// changed ones: a blob whose upload failed last run is retried although its note
+	// did not change.
+	const wanted = [...firstFile.keys()];
+	const missing: string[] = [];
+	for (let i = 0; i < wanted.length; i += CHECK_CHUNK) {
+		const chunk = wanted.slice(i, i + CHECK_CHUNK);
+		const out = await transport.checkAttachments({ serverUrl, token, sha256: chunk });
+		if (!out.ok) {
+			if (out.authExpired) return { ...result, authExpired: true, failMessage: out.message };
+			// Cannot tell what is missing: upload nothing this run. The refs stay `ok`
+			// (the server shows "retrying") and the next run checks again.
+			return settle(BUSY_STATUSES.has(out.status));
+		}
+		if (!out.supported) return settle(false); // switched off mid-run: the same
+		missing.push(...out.missing);
+		remainingBytes = out.remainingBytes;
+	}
+
+	// 5. Upload each missing blob once, in order, from the first path that has it,
+	// within this run's budget.
+	const budget = deps.uploadBudget ?? { ms: UPLOAD_BUDGET_MS, bytes: UPLOAD_BUDGET_BYTES };
+	const started = clock();
+	let sentBytes = 0;
+	let busy = false;
+	for (let i = 0; i < missing.length; i++) {
+		await step();
+		if (clock() - started >= budget.ms || sentBytes >= budget.bytes) break; // later runs go on
+		if (deps.shouldStop?.()) break;
+		const sha = missing[i]!;
+		const f = firstFile.get(sha);
+		if (!f) continue;
+		if (f.size > remainingBytes) {
+			markStorageLimit(sha);
+			continue;
+		}
+		let bytes: ArrayBuffer;
+		try {
+			bytes = await vaultSource.readBinary(f.path);
+		} catch {
+			addIssue({ path: f.path, reason: 'upload-failed', size: f.size });
+			continue;
+		}
+		// The buffer sent is the buffer hashed (review M1). If it no longer matches the
+		// ref (the file changed since, or a cache entry went stale under the same mtime
+		// and size), the server would refuse it as a mismatch on every run: drop the
+		// cache entry instead, so the next run hashes the file afresh. The ref stays
+		// `ok` meanwhile and the server shows "retrying".
+		if (sha256HexBytes(bytes) !== sha) {
+			delete data.attachmentHashes[f.path];
+			continue;
+		}
+		const up = await transport.uploadAttachment({
+			serverUrl, token, sha256: sha, name: f.path, mime: mimeForExtension(f.extension), data: bytes,
+		});
+		if (up.ok) {
+			result.sent += 1;
+			remainingBytes -= f.size;
+			sentBytes += f.size;
+			continue;
+		}
+		if (up.authExpired) return { ...result, authExpired: true, failMessage: up.message };
+		if (up.retryLater) {
+			// the server is busy or switched off: the next sync's check retries
+			busy = BUSY_STATUSES.has(up.status);
+			break;
+		}
+		if (up.storageFull) {
+			for (let j = i; j < missing.length; j++) {
+				await step();
+				markStorageLimit(missing[j]!);
+			}
+			break;
+		}
+		if (up.status === 403) {
+			// The plan or the vault connection, for the whole run: one issue, no more tries.
+			addIssue({ path: f.path, reason: 'upload-failed', size: f.size, message: up.message });
+			break;
+		}
+		addIssue({ path: f.path, reason: 'upload-failed', size: f.size });
+	}
+	return settle(busy);
+}

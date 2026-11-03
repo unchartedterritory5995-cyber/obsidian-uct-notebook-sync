@@ -23,6 +23,27 @@ export interface NoteInput {
 	 * `received_at` instead) — see sync-manager.ts's module docstring. Send
 	 * it honestly anyway; it is still used for display/conflict purposes. */
 	updated_at: string;
+	/** The note's attachment refs (plugin 0.2.0). Omitted, never `[]`-for-unknown,
+	 * when the plugin sends no list (an older server, or legacy mode): the server
+	 * reads an absent list as "this plugin sent none". */
+	attachments?: NoteAttachmentRef[];
+}
+
+/** A ref's status, as `ObsidianAttachmentRef.status` in api/routers/note_sync.py. */
+export type AttachmentStatus = 'ok' | 'too-large' | 'missing' | 'off' | 'storage-limit';
+
+/** One attachment a note uses, resolved with Obsidian's own resolver. Mirrors
+ * `ObsidianAttachmentRef` in api/routers/note_sync.py: `original` is an exact
+ * substring of the note (1..2048 chars), `path` the resolved vault path, or for
+ * `missing` the name as written (1..1024), and `sha256` is set exactly when
+ * `status` is `ok` or `storage-limit`. */
+export interface NoteAttachmentRef {
+	original: string;
+	embed: boolean;
+	path: string;
+	size: number;
+	sha256: string | null;
+	status: AttachmentStatus;
 }
 
 /** Body of `POST /obsidian/ingest`. `consent` is always `true` here — the
@@ -71,6 +92,26 @@ export interface ScannedFile {
 	/** ISO-8601, derived from the file's own mtime. */
 	updatedAt: string;
 	body: string;
+	/** The note's attachment refs; `null` = send none (a server without attachment
+	 * support, or a note Obsidian has not indexed yet), and the field is omitted. */
+	attachments: NoteAttachmentRef[] | null;
+}
+
+/** One image or file that could not come over, shown in Settings. */
+export interface AttachmentIssue {
+	path: string;
+	/** `link-too-long`: the ref is over the server's `original`/`path` bounds and cannot
+	 * be sent. `too-many-files`: a note past the server's per-note ref cap (one issue per
+	 * note). */
+	reason: 'too-large' | 'missing' | 'storage-limit' | 'upload-failed' | 'link-too-long' | 'too-many-files'
+		| 'note-too-large-for-files' | 'server-busy' | 'waiting-for-index' | 'pushed-without-files'
+		| 'check-failing';
+	size: number;
+	/** The server's own sentence, when one failure stands for the whole run (a 403). */
+	message?: string;
+	/** The server limit the issue is about, as the server stated it: bytes for
+	 * `too-large`, refs for `too-many-files`. Settings words its text from this. */
+	limit?: number;
 }
 
 /** Everything the plugin remembers, per vault_path, between sync runs. */
@@ -89,6 +130,15 @@ export interface FileState {
 	 * pushes (until its hash changes) and the manifest (it was never
 	 * actually staged, so naming it would be dishonest). */
 	tooLarge?: boolean;
+	/** The last push of this note carried a non-empty attachment list. While Obsidian
+	 * has not indexed such a note, it is deferred rather than pushed without its list
+	 * (which the server would read as "no list": notices, and its blobs GC'd). */
+	hadRefs?: boolean;
+	/** Consecutive runs this note was deferred while unindexed (absent = none). */
+	deferredRuns?: number;
+	/** Pushed without its list after too many deferrals; Settings says so until a push
+	 * with a list replaces this state. */
+	listlessPush?: boolean;
 }
 
 /** Everything persisted via Obsidian's `Plugin.loadData()`/`saveData()`
@@ -111,6 +161,27 @@ export interface PluginData {
 	/** Per-vault_path sync bookkeeping. Entries are garbage-collected the
 	 * moment a path disappears from a vault scan (see applySyncResult). */
 	files: Record<string, FileState>;
+	/** Send the images and files notes use (plugin 0.2.0). Default on. */
+	syncAttachments: boolean;
+	/** Vault path -> the sha256 last computed for it, reused while mtime and size match.
+	 * Entries for paths no note references any more are dropped each run. */
+	attachmentHashes: Record<string, { mtime: number; size: number; sha256: string }>;
+	/** What could not come over in the last run (replaced each run). */
+	attachmentIssues: AttachmentIssue[];
+	/** The one-time "now also sends images and files" notice was shown. */
+	attachmentsNoticeShown: boolean;
+	/** The last answer the server gave about attachments: its limits when it takes them,
+	 * `null` when it said it does not (or never answered). A transient probe failure
+	 * keeps this, so a supported vault never flips to legacy for one run. */
+	attachmentServer: { maxBytes: number; maxRefsPerNote?: number } | null;
+	/** Consecutive runs the server answered busy (429/503) to blob uploads. */
+	attachmentBusyRuns: number;
+	/** Consecutive offline runs for any other reason (a refused or failing check). */
+	attachmentCheckFailRuns: number;
+	/** The origin the device token was redeemed against. The token is never sent to
+	 * any other origin: a Server URL edited to a typo or a stranger's address cannot
+	 * receive it (final review I6). `null` = no token, or not yet bound. */
+	tokenOrigin: string | null;
 }
 
 /**
@@ -148,5 +219,13 @@ export function defaultPluginData(vaultId: string): PluginData {
 		lastSyncAt: null,
 		lastSyncError: null,
 		files: {},
+		syncAttachments: true,
+		attachmentHashes: {},
+		attachmentIssues: [],
+		attachmentsNoticeShown: false,
+		attachmentServer: null,
+		attachmentBusyRuns: 0,
+		attachmentCheckFailRuns: 0,
+		tokenOrigin: null,
 	};
 }
