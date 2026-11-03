@@ -41,6 +41,20 @@ const BUSY_STATUSES: ReadonlySet<number> = new Set([429, 503]);
 /** Consecutive busy runs before Settings shows a "server busy" issue. */
 export const BUSY_RUNS_FOR_ISSUE = 3;
 
+/**
+ * Hashing is budgeted like uploads (final review I2): the first 0.2.0 run of a vault
+ * with GBs of attachments on a slow or on-demand disk could otherwise spend minutes
+ * reading before any text goes out, and lose it all if Obsidian is closed. A run hashes
+ * for at most HASH_BUDGET_MS; notes it did not reach are `pending` (their text is pushed
+ * without a list, or held if their last push had one) and the next run carries on. The
+ * cache is saved every SAVE_EVERY_HASHES files, so an interrupted run loses seconds.
+ */
+export const HASH_BUDGET_MS = 60_000;
+export const SAVE_EVERY_HASHES = 200;
+/** Files hashed in one run before the one-time "preparing" notice. */
+export const PROGRESS_NOTICE_AFTER = 100;
+export const PREPARING_MESSAGE = 'UCT Notebook Sync: preparing the images and files your notes use…';
+
 export const UPLOAD_BUDGET_MS = 60_000;
 export const UPLOAD_BUDGET_BYTES = 100 * 1024 * 1024;
 
@@ -53,6 +67,13 @@ export interface PrepareDeps {
 	/** Milliseconds; injectable for tests. Default `Date.now`. */
 	clock?: () => number;
 	uploadBudget?: { ms: number; bytes: number };
+	/** How long a run may spend hashing files before it pushes the text (default
+	 * HASH_BUDGET_MS). */
+	hashBudgetMs?: number;
+	/** Persist `data` (the hash cache) mid-run, every SAVE_EVERY_HASHES files hashed. */
+	saveProgress?: () => Promise<void>;
+	/** Shown once when a run has many files to prepare. */
+	onProgress?: (message: string) => void;
 }
 
 export interface PrepareResult {
@@ -64,6 +85,8 @@ export interface PrepareResult {
 	issues: AttachmentIssue[];
 	authExpired: boolean;
 	failMessage?: string;
+	/** Notes the hashing budget did not reach this run (their refs are `null`). */
+	pending: Set<string>;
 }
 
 function codePoints(s: string): number {
@@ -86,6 +109,7 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 		sent: 0,
 		issues: [],
 		authExpired: false,
+		pending: new Set<string>(),
 	});
 
 	// 1. Does this server speak attachments, and what are its limits?
@@ -137,8 +161,13 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 	const step = async (): Promise<void> => {
 		if (++steps % YIELD_EVERY === 0) await yieldToUi();
 	};
+	const clock = deps.clock ?? Date.now;
+	const hashStarted = clock();
+	const hashBudgetMs = deps.hashBudgetMs ?? HASH_BUDGET_MS;
+	const pending = new Set<string>();
+	let hashed = 0;
 
-	for (const notePath of notePaths) {
+	notes: for (const notePath of notePaths) {
 		await step();
 		// ⛔ A note Obsidian has not indexed yet sends NO list (null), never `[]`: `[]`
 		// would tell the server "this note uses no files", and its hash would match a
@@ -196,6 +225,12 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 				if (cached && cached.mtime === file.mtime && cached.size === file.size) {
 					sha = cached.sha256;
 				} else {
+					if (clock() - hashStarted >= hashBudgetMs) {
+						// out of hashing time: this note waits for the next run
+						pending.add(notePath);
+						refsByNote.set(notePath, null);
+						continue notes;
+					}
 					try {
 						sha = sha256HexBytes(await vaultSource.readBinary(file.path));
 					} catch {
@@ -204,6 +239,11 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 						addIssue({ path: file.path, reason: 'missing', size: 0 });
 						continue;
 					}
+					// into the live cache at once, so a mid-run save keeps it
+					data.attachmentHashes[file.path] = { mtime: file.mtime, size: file.size, sha256: sha };
+					hashed += 1;
+					if (hashed === PROGRESS_NOTICE_AFTER) deps.onProgress?.(PREPARING_MESSAGE);
+					if (hashed % SAVE_EVERY_HASHES === 0) await deps.saveProgress?.();
 				}
 				hashes[file.path] = { mtime: file.mtime, size: file.size, sha256: sha };
 			}
@@ -213,10 +253,13 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 		if (overflow) addIssue({ path: notePath, reason: 'too-many-files', size: 0 });
 		refsByNote.set(notePath, refs);
 	}
-	// Only paths referenced this run keep a cache entry.
-	data.attachmentHashes = hashes;
+	// Only paths referenced this run keep a cache entry: but only on a run that reached
+	// every note. A budget-cut run did not see the pending notes' files, so it collects
+	// nothing (their entries, and the ones it just hashed, all stay).
+	if (pending.size === 0) data.attachmentHashes = hashes;
+	else data.attachmentHashes = { ...data.attachmentHashes, ...hashes };
 
-	const result: PrepareResult = { supported: true, refsByNote, sent: 0, issues, authExpired: false };
+	const result: PrepareResult = { supported: true, refsByNote, sent: 0, issues, authExpired: false, pending };
 	// A server too busy to take blobs (429/503) is only "retrying" in the note. After
 	// BUSY_RUNS_FOR_ISSUE runs in a row it is also a Settings issue (review M4); any
 	// run that is not busy resets the count.
@@ -268,7 +311,6 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 
 	// 5. Upload each missing blob once, in order, from the first path that has it,
 	// within this run's budget.
-	const clock = deps.clock ?? Date.now;
 	const budget = deps.uploadBudget ?? { ms: UPLOAD_BUDGET_MS, bytes: UPLOAD_BUDGET_BYTES };
 	const started = clock();
 	let sentBytes = 0;

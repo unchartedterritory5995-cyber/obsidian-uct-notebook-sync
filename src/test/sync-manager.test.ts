@@ -763,6 +763,41 @@ describe('SyncManager.runSync with attachments', () => {
 		expect(store.files['huge.md']!.tooLarge).toBe(false);
 	});
 
+	it('a hashing budget cut pushes the text now and the lists next run; a note that had refs is held (I2)', async () => {
+		const t = new FakeServer();
+		const vault = new FakeVault()
+			.note('a.md', '![[p.png]]', [embed('p.png')])
+			.note('b.md', '![[q.png]]', [embed('q.png')])
+			.file('att/p.png', bytes('p')).file('att/q.png', bytes('q'));
+		let now = 0;
+		vault.onRead = () => { now += 61_000; }; // one read spends the whole 60 s budget
+		const m = new SyncManager({
+			transport: t, vaultSource: vault, getData: () => store,
+			saveData: async (d) => { store = JSON.parse(JSON.stringify(d)) as PluginData; },
+			clock: () => now,
+		});
+		const s1 = await m.runSync();
+		expect(s1.ok).toBe(true);
+		const pushed1 = t.pushedNotes();
+		expect(pushed1.map((n) => n.vault_path)).toEqual(['a.md', 'b.md']); // all text went out
+		expect(pushed1.find((n) => n.vault_path === 'b.md')!.attachments).toBeUndefined();
+
+		t.reset();
+		await m.runSync();
+		expect(t.pushedNotes().map((n) => [n.vault_path, n.attachments?.length])).toEqual([['b.md', 1]]);
+
+		// a note that already went out WITH refs is held, not pushed list-less, when cut
+		vault.notes['a.md'] = '![[p.png]] edited';
+		vault.file('att/p.png', bytes('P'), 2); // changed: needs a fresh hash
+		vault.notes['b.md'] = '![[q.png]] edited';
+		vault.file('att/q.png', bytes('Q'), 2);
+		t.reset();
+		await m.runSync();
+		const pushed3 = t.pushedNotes();
+		expect(pushed3.map((n) => n.vault_path)).toEqual(['a.md']); // b was cut and is held
+		expect(store.attachmentIssues.filter((i) => i.reason === 'waiting-for-index')).toEqual([]);
+	});
+
 	it('a 403 on upload stops uploads but the notes are still pushed', async () => {
 		const t = new FakeServer();
 		t.uploadScript = [uploadFailure(403, 'Upgrade required')];

@@ -30,6 +30,7 @@ export default class UctNotebookSyncPlugin extends Plugin {
 			vaultSource: new ObsidianVaultSource(this.app),
 			getData: () => this.data,
 			saveData: (data) => this.saveData(data),
+			onProgress: (message) => { new Notice(message); },
 		});
 
 		this.settingTab = new UctNotebookSyncSettingTab(this.app, this);
@@ -50,6 +51,12 @@ export default class UctNotebookSyncPlugin extends Plugin {
 				void this.runManualSync();
 			},
 		});
+	}
+
+	onunload(): void {
+		// The hash cache is written into `data` as files are hashed: saving here keeps a
+		// sync cut short by closing Obsidian from re-reading those files (final review I2).
+		if (this.data) void this.saveData(this.data);
 	}
 
 	private async loadPluginData(): Promise<void> {

@@ -79,6 +79,70 @@ describe('prepareAttachments on a big vault (final review I1)', () => {
 	}, 60_000);
 });
 
+describe('prepareAttachments hashing budget and progress (final review I2)', () => {
+	function vaultOf(n: number): FakeVault {
+		const vault = new FakeVault();
+		for (let i = 0; i < n; i++) {
+			vault.file(`att/f${i}.png`, bytes(`blob ${i}`));
+			vault.note(`n${i}.md`, 'x', [embed(`f${i}.png`)]);
+		}
+		return vault;
+	}
+	const holdingAll = (vault: FakeVault): FakeServer => {
+		const s = new FakeServer(); // already holds every blob: no upload reads
+		for (const f of Object.values(vault.files)) s.stored.add(shaOf(f.data));
+		return s;
+	};
+
+	it('stops hashing at the budget, leaves the rest of the notes pending, and the next run resumes', async () => {
+		const vault = vaultOf(5);
+		let now = 0;
+		vault.onRead = () => { now += 1000; };
+		const d = data();
+		const go = () => prepareAttachments(
+			{ transport: holdingAll(vault), vaultSource: vault, data: d, serverUrl: 'https://x.test', token: 't',
+				clock: () => now, hashBudgetMs: 2500 },
+			Object.keys(vault.notes),
+		);
+		const r1 = await go();
+		expect(vault.readBinaryCalls).toEqual(['att/f0.png', 'att/f1.png', 'att/f2.png']);
+		expect([...r1.pending].sort()).toEqual(['n3.md', 'n4.md']);
+		expect(r1.refsByNote.get('n3.md')).toBeNull();
+		expect(r1.refsByNote.get('n0.md')![0]!.status).toBe('ok');
+
+		vault.readBinaryCalls = [];
+		const r2 = await go();
+		expect(vault.readBinaryCalls).toEqual(['att/f3.png', 'att/f4.png']); // only what run 1 did not hash
+		expect(r2.pending.size).toBe(0);
+		expect(Object.keys(d.attachmentHashes).sort()).toHaveLength(5);
+	});
+
+	it('saves the hash cache every 200 files, so an interrupted run loses only the last few', async () => {
+		const vault = vaultOf(450);
+		const d = data();
+		const snapshots: number[] = [];
+		let lastSaved: PluginData['attachmentHashes'] = {};
+		const progress: string[] = [];
+		await prepareAttachments(
+			{ transport: holdingAll(vault), vaultSource: vault, data: d, serverUrl: 'https://x.test', token: 't',
+				saveProgress: async () => {
+					snapshots.push(Object.keys(d.attachmentHashes).length);
+					lastSaved = JSON.parse(JSON.stringify(d.attachmentHashes)) as PluginData['attachmentHashes'];
+				},
+				onProgress: (m) => progress.push(m) },
+			Object.keys(vault.notes),
+		);
+		expect(snapshots).toEqual([200, 400]);
+		expect(progress).toHaveLength(1); // one "preparing" notice on a long run
+		expect(progress[0]).toMatch(/images and files/i);
+
+		// the run "died" after the last save: a restart hashes only the 50 not saved
+		vault.readBinaryCalls = [];
+		await run(holdingAll(vault), vault, data({ attachmentHashes: lastSaved }));
+		expect(vault.readBinaryCalls).toHaveLength(50);
+	});
+});
+
 describe('prepareAttachments', () => {
 	it('a server without attachment support maps every note to null (legacy) and never waits or reads', async () => {
 		const server = new FakeServer();

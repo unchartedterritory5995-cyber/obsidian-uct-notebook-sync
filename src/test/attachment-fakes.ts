@@ -83,8 +83,12 @@ export class FakeVault implements VaultSource {
 		return this.resolveLink(raw.linkpath);
 	}
 
+	/** Called on every binary read, e.g. to advance a fake clock. */
+	onRead: (path: string) => void = () => {};
+
 	async readBinary(path: string): Promise<ArrayBuffer> {
 		this.readBinaryCalls.push(path);
+		this.onRead(path);
 		const f = this.files[path];
 		if (!f) throw new Error(`no such file: ${path}`);
 		return f.data.slice().buffer as ArrayBuffer;

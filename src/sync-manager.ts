@@ -88,6 +88,8 @@ export interface SyncManagerDeps {
 	now?: () => string;
 	/** Milliseconds, for the attachment upload budget; injectable for tests. */
 	clock?: () => number;
+	/** A progress message for the member (main.ts shows it as a Notice). */
+	onProgress?: (message: string) => void;
 	batchOptions?: BatchOptions;
 }
 
@@ -159,6 +161,8 @@ export class SyncManager {
 				serverUrl: data.serverUrl,
 				token: deviceToken,
 				clock: this.deps.clock,
+				saveProgress: () => this.deps.saveData(data),
+				onProgress: this.deps.onProgress,
 			},
 			files.map((f) => f.path),
 		);
@@ -190,7 +194,16 @@ export class SyncManager {
 			// list follows on the first indexed run. The count lives in `data.files`,
 			// so it survives a restart.
 			const prior = data.files[f.path];
-			const unindexed = att.supported && refs === null;
+			// Not reached by this run's hashing budget: its last pushed state stands if it
+			// carried a list (held, like a deferral, but with no count or issue: the next
+			// run carries on); otherwise its text goes out now and its list next run.
+			if (att.pending.has(f.path)) {
+				if (prior?.hadRefs && !prior.tooLarge) {
+					scanned.push({ path: f.path, hash: prior.hash, updatedAt, body, attachments: null });
+					continue;
+				}
+			}
+			const unindexed = att.supported && refs === null && !att.pending.has(f.path);
 			if (unindexed && prior?.hadRefs && !prior.tooLarge) {
 				const runs = (prior.deferredRuns ?? 0) + 1;
 				if (runs <= MAX_DEFERRED_RUNS) {
