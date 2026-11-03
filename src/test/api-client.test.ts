@@ -202,6 +202,21 @@ describe('ObsidianHttpTransport attachments', () => {
 		expect(req.throw).toBe(false);
 	});
 
+	it('check: reads the per-note ref cap when the server sends it (final review I3)', async () => {
+		requestUrlMock.mockResolvedValueOnce(
+			respond(200, { protocol: 1, missing: [], maxBytes: 9, remainingBytes: 8, maxRefsPerNote: 1200 }),
+		);
+		expect(await check([])).toEqual({
+			ok: true, supported: true, missing: [], maxBytes: 9, remainingBytes: 8, maxRefsPerNote: 1200,
+		});
+		for (const bad of [0, -1, 2.5, '1200', null]) {
+			requestUrlMock.mockResolvedValueOnce(
+				respond(200, { protocol: 1, missing: [], maxBytes: 9, remainingBytes: 8, maxRefsPerNote: bad }),
+			);
+			expect(await check([])).toEqual({ ok: true, supported: true, missing: [], maxBytes: 9, remainingBytes: 8 });
+		}
+	});
+
 	it('check: an empty list still asks (that is how the protocol and limits are learned)', async () => {
 		requestUrlMock.mockResolvedValueOnce(respond(200, { protocol: 1, missing: [], maxBytes: 5, remainingBytes: 4 }));
 		expect(await check([])).toEqual({ ok: true, supported: true, missing: [], maxBytes: 5, remainingBytes: 4 });

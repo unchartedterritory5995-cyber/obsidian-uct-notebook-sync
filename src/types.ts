@@ -101,12 +101,16 @@ export interface ScannedFile {
 export interface AttachmentIssue {
 	path: string;
 	/** `link-too-long`: the ref is over the server's `original`/`path` bounds and cannot
-	 * be sent. `too-many-files`: a note past the 5000-ref cap (one issue per note). */
+	 * be sent. `too-many-files`: a note past the server's per-note ref cap (one issue per
+	 * note). */
 	reason: 'too-large' | 'missing' | 'storage-limit' | 'upload-failed' | 'link-too-long' | 'too-many-files'
 		| 'note-too-large-for-files' | 'server-busy' | 'waiting-for-index' | 'pushed-without-files';
 	size: number;
 	/** The server's own sentence, when one failure stands for the whole run (a 403). */
 	message?: string;
+	/** The server limit the issue is about, as the server stated it: bytes for
+	 * `too-large`, refs for `too-many-files`. Settings words its text from this. */
+	limit?: number;
 }
 
 /** Everything the plugin remembers, per vault_path, between sync runs. */
@@ -168,7 +172,7 @@ export interface PluginData {
 	/** The last answer the server gave about attachments: its limits when it takes them,
 	 * `null` when it said it does not (or never answered). A transient probe failure
 	 * keeps this, so a supported vault never flips to legacy for one run. */
-	attachmentServer: { maxBytes: number } | null;
+	attachmentServer: { maxBytes: number; maxRefsPerNote?: number } | null;
 	/** Consecutive runs the server answered busy (429/503) to blob uploads. */
 	attachmentBusyRuns: number;
 }

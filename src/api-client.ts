@@ -80,7 +80,11 @@ export interface CheckParams {
  * plugin syncs text-only, as 0.1.x did. */
 export type CheckOutcome =
 	| { ok: true; supported: false }
-	| { ok: true; supported: true; missing: string[]; maxBytes: number; remainingBytes: number }
+	| {
+		ok: true; supported: true; missing: string[]; maxBytes: number; remainingBytes: number;
+		/** The server's per-note ref cap (`_MAX_ATTACHMENTS_PER_NOTE`), when it says. */
+		maxRefsPerNote?: number;
+	}
 	| { ok: false; status: number; message: string; authExpired: boolean };
 
 export interface UploadParams {
@@ -265,12 +269,13 @@ export class ObsidianHttpTransport implements Transport {
 		}
 		if (chunks.length === 0) chunks.push([]);
 		const missing: string[] = [];
-		let limits = { maxBytes: 0, remainingBytes: 0 };
+		let limits: { maxBytes: number; remainingBytes: number; maxRefsPerNote?: number } = { maxBytes: 0, remainingBytes: 0 };
 		for (const chunk of chunks) {
 			const one = await this.checkOnce(params, chunk);
 			if (!one.ok || !one.supported) return one;
 			missing.push(...one.missing);
 			limits = { maxBytes: one.maxBytes, remainingBytes: one.remainingBytes };
+			if (one.maxRefsPerNote !== undefined) limits.maxRefsPerNote = one.maxRefsPerNote;
 		}
 		return { ok: true, supported: true, missing, ...limits };
 	}
@@ -307,7 +312,14 @@ export class ObsidianHttpTransport implements Transport {
 			|| typeof maxBytes !== 'number' || typeof remainingBytes !== 'number') {
 			return { ok: false, status: res.status, message: 'Unexpected attachment check response.', authExpired: false };
 		}
-		return { ok: true, supported: true, missing: missing as string[], maxBytes, remainingBytes };
+		const out: Extract<CheckOutcome, { supported: true }> = {
+			ok: true, supported: true, missing: missing as string[], maxBytes, remainingBytes,
+		};
+		// The per-note ref cap, so a lowered server cap never strands a shipped plugin
+		// (final review I3). Only a positive integer counts; anything else is ignored.
+		const cap = body.maxRefsPerNote;
+		if (typeof cap === 'number' && Number.isInteger(cap) && cap > 0) out.maxRefsPerNote = cap;
+		return out;
 	}
 
 	/**

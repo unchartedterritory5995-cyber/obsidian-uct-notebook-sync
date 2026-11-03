@@ -173,7 +173,7 @@ describe('prepareAttachments', () => {
 		const vault = new FakeVault().note('a.md', '![[a.png]]', [embed('a.png')]).file('att/a.png', A);
 		const d = data();
 		await run(new FakeServer(), vault, d);
-		expect(d.attachmentServer).toEqual({ maxBytes: 26_214_400 });
+		expect(d.attachmentServer).toEqual({ maxBytes: 26_214_400, maxRefsPerNote: 5000 });
 
 		for (const status of [403, 429, 500, 502, 503, 0]) {
 			const server = new FakeServer();
@@ -185,7 +185,7 @@ describe('prepareAttachments', () => {
 			]);
 			expect(server.checkCalls).toEqual([[]]); // nothing checked or uploaded this run
 			expect(server.uploadCalls).toEqual([]);
-			expect(d.attachmentServer).toEqual({ maxBytes: 26_214_400 });
+			expect(d.attachmentServer).toEqual({ maxBytes: 26_214_400, maxRefsPerNote: 5000 });
 		}
 
 		// a missing route is the server saying "no attachments": legacy, and remembered
@@ -371,7 +371,7 @@ describe('prepareAttachments', () => {
 			{ original: '![[a.png]]', embed: true, path: 'att/a.png', size: 5, sha256: shaOf(A), status: 'storage-limit' },
 		]);
 		expect(r.issues).toEqual([
-			{ path: 'att/big.png', reason: 'too-large', size: 10 },
+			{ path: 'att/big.png', reason: 'too-large', size: 10, limit: 6 },
 			{ path: 'gone.png', reason: 'missing', size: 0 },
 			{ path: 'att/a.png', reason: 'storage-limit', size: 5 },
 		]);
@@ -451,6 +451,28 @@ describe('prepareAttachments', () => {
 		expect(vault.readBinaryCalls).toEqual([]);
 	});
 
+	it('uses the per-note ref cap the server advertises, and remembers it for offline runs (final review I3)', async () => {
+		const refs = [];
+		const vault = new FakeVault();
+		for (let i = 0; i < 5; i++) refs.push(embed(`gone${i}.png`));
+		vault.note('a.md', 'x', refs);
+		const server = new FakeServer();
+		server.maxRefsPerNote = 3;
+		const d = data();
+		const r = await run(server, vault, d);
+		expect(r.refsByNote.get('a.md')).toHaveLength(3); // the first N go, never a 400 for the batch
+		expect(r.issues).toContainEqual({ path: 'a.md', reason: 'too-many-files', size: 0, limit: 3 });
+		expect(d.attachmentServer).toEqual({ maxBytes: 26_214_400, maxRefsPerNote: 3 });
+
+		const down = new FakeServer();
+		down.checkScript = [{ ok: false, status: 502, message: 'Bad Gateway', authExpired: false }];
+		expect((await run(down, vault, d)).refsByNote.get('a.md')).toHaveLength(3);
+
+		// absent: 5000
+		const r2 = await run(new FakeServer(), vault, data());
+		expect(r2.refsByNote.get('a.md')).toHaveLength(5);
+	});
+
 	it('enforces the server caps: original <= 2048, path <= 1024 code points, <= 5000 refs a note', async () => {
 		const server = new FakeServer();
 		const longName = `${'x'.repeat(1030)}.png`;
@@ -489,7 +511,7 @@ describe('prepareAttachments', () => {
 		// the first 5000 are sent (the server shows their notices); ONE issue for the rest
 		expect(r2.refsByNote.get('m.md')).toHaveLength(5000);
 		expect(r2.issues.filter((i) => i.reason === 'too-many-files'))
-			.toEqual([{ path: 'm.md', reason: 'too-many-files', size: 0 }]);
+			.toEqual([{ path: 'm.md', reason: 'too-many-files', size: 0, limit: 5000 }]);
 
 		// refs past 5000 that are only note links are not "files not sent"
 		const links = new FakeVault();

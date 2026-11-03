@@ -27,18 +27,40 @@ export function shortenForDisplay(text: string, max = DISPLAY_MAX): string {
 	return [...cps.slice(0, head), '…', ...cps.slice(cps.length - tail)].join('');
 }
 
-const ATTACHMENT_REASON_TEXT: Record<AttachmentIssue['reason'], string> = {
-	'too-large': 'larger than 25 MB',
+/** Reasons whose text does not depend on a server limit. */
+const ATTACHMENT_REASON_TEXT: Record<Exclude<AttachmentIssue['reason'], 'too-large' | 'too-many-files'>, string> = {
 	missing: 'not found in this vault',
 	'storage-limit': 'UCT storage is full',
 	'upload-failed': 'upload failed, will retry on the next sync',
 	'link-too-long': 'name or link too long to sync',
-	'too-many-files': 'more than 5000 images and files in one note; the rest were not sent',
 	'note-too-large-for-files': 'note too large to send with its images and files; they were not sent',
 	'server-busy': 'UCT is busy and is not taking images and files right now; will keep retrying',
 	'waiting-for-index': 'waiting for Obsidian to index this note; its changes will sync once it has',
 	'pushed-without-files': 'pushed without its images and files; Obsidian has not indexed it yet',
 };
+
+function megabytes(bytes: number): string {
+	const mb = bytes / (1024 * 1024);
+	return `${Number.isInteger(mb) ? mb : Math.round(mb * 10) / 10} MB`;
+}
+
+/**
+ * The text Settings shows for one issue. Limits come from the server's own answer
+ * (`issue.limit`), never a number written here, so a changed server cap is described
+ * truthfully (final review I3, M2). A server sentence, when there is one, wins.
+ */
+export function issueText(issue: AttachmentIssue): string {
+	if (issue.message) return issue.message;
+	if (issue.reason === 'too-large') {
+		return issue.limit ? `larger than ${megabytes(issue.limit)}` : 'larger than UCT accepts';
+	}
+	if (issue.reason === 'too-many-files') {
+		return issue.limit
+			? `more than ${issue.limit} images and files in one note; the rest were not sent`
+			: 'too many images and files in one note; the rest were not sent';
+	}
+	return ATTACHMENT_REASON_TEXT[issue.reason];
+}
 
 export class UctNotebookSyncSettingTab extends PluginSettingTab {
 	private connectCode = '';
@@ -96,7 +118,11 @@ export class UctNotebookSyncSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Sync images and files')
-			.setDesc('Send the images and files your notes use (up to 25 MB each). Turn off to send note text only.')
+			.setDesc(
+				'Send the images and files your notes use' +
+				(data.attachmentServer ? ` (up to ${megabytes(data.attachmentServer.maxBytes)} each)` : '') +
+				'. Turn off to send note text only.',
+			)
 			.addToggle((toggle) =>
 				toggle.setValue(data.syncAttachments).onChange(async (value) => {
 					data.syncAttachments = value;
@@ -122,7 +148,7 @@ export class UctNotebookSyncSettingTab extends PluginSettingTab {
 			.setHeading();
 		const list = containerEl.createEl('ul');
 		for (const issue of issues) {
-			const text = issue.message ?? ATTACHMENT_REASON_TEXT[issue.reason];
+			const text = issueText(issue);
 			// a run-wide issue (server busy) names no file
 			list.createEl('li', issue.path
 				? { text: `${shortenForDisplay(issue.path)}: ${text}`, attr: { title: issue.path } }

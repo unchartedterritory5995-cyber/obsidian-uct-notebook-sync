@@ -26,8 +26,9 @@ export const CHECK_CHUNK = 1000;
  * sent; its original stays in the note as the member wrote it. */
 export const MAX_ORIGINAL_CHARS = 2048;
 export const MAX_PATH_CHARS = 1024;
-/** `_MAX_ATTACHMENTS_PER_NOTE`: refs past this are not sent. */
-export const MAX_REFS_PER_NOTE = 5000;
+/** `_MAX_ATTACHMENTS_PER_NOTE`'s value when the server does not advertise its own
+ * `maxRefsPerNote` in the check answer: refs past the cap are not sent. */
+export const DEFAULT_MAX_REFS_PER_NOTE = 5000;
 
 /**
  * A run uploads for at most this long, or this many bytes, then the note text goes
@@ -125,20 +126,23 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 	let probeBusy = false;
 	let maxBytes: number;
 	let remainingBytes: number;
+	let maxRefs: number;
 	if (!probe.ok) {
 		if (probe.authExpired) return { ...legacy(), authExpired: true, failMessage: probe.message };
 		if (data.attachmentServer === null) return legacy();
 		offline = true;
 		probeBusy = BUSY_STATUSES.has(probe.status);
 		maxBytes = data.attachmentServer.maxBytes;
+		maxRefs = data.attachmentServer.maxRefsPerNote ?? DEFAULT_MAX_REFS_PER_NOTE;
 		remainingBytes = Number.POSITIVE_INFINITY;
 	} else if (!probe.supported) {
 		data.attachmentServer = null;
 		return legacy();
 	} else {
-		data.attachmentServer = { maxBytes: probe.maxBytes };
 		maxBytes = probe.maxBytes;
+		maxRefs = probe.maxRefsPerNote ?? DEFAULT_MAX_REFS_PER_NOTE;
 		remainingBytes = probe.remainingBytes;
+		data.attachmentServer = { maxBytes, maxRefsPerNote: maxRefs };
 	}
 
 	// 2. Obsidian's link index.
@@ -195,8 +199,8 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 				addIssue({ path: refPath, reason: 'link-too-long', size: 0 });
 				continue;
 			}
-			if (refs.length >= MAX_REFS_PER_NOTE) {
-				overflow = true; // the first 5000 are sent; ONE issue for the rest
+			if (refs.length >= maxRefs) {
+				overflow = true; // the first N are sent (never a 400 for the batch); ONE issue for the rest
 				continue;
 			}
 			if (c.kind === 'missing') {
@@ -216,7 +220,7 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 			}
 			if (file.size > maxBytes) {
 				refs.push({ ...base, sha256: null, status: 'too-large' });
-				addIssue({ path: file.path, reason: 'too-large', size: file.size });
+				addIssue({ path: file.path, reason: 'too-large', size: file.size, limit: maxBytes });
 				continue;
 			}
 			let sha = hashes[file.path]?.sha256;
@@ -250,7 +254,7 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 			refs.push({ ...base, sha256: sha, status: 'ok' });
 			if (!firstFile.has(sha)) firstFile.set(sha, { path: file.path, size: file.size, extension: file.extension });
 		}
-		if (overflow) addIssue({ path: notePath, reason: 'too-many-files', size: 0 });
+		if (overflow) addIssue({ path: notePath, reason: 'too-many-files', size: 0, limit: maxRefs });
 		refsByNote.set(notePath, refs);
 	}
 	// Only paths referenced this run keep a cache entry: but only on a run that reached

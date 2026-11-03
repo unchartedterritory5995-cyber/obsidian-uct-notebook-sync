@@ -1,5 +1,22 @@
 import { describe, expect, it } from 'vitest';
-import { shortenForDisplay } from '../settings';
+import { issueText, shortenForDisplay } from '../settings';
+
+describe('issueText (final review I3, M2)', () => {
+	it('builds limit texts from the server answer, never a hard-coded number', () => {
+		expect(issueText({ path: 'a.md', reason: 'too-many-files', size: 0, limit: 1200 }))
+			.toBe('more than 1200 images and files in one note; the rest were not sent');
+		expect(issueText({ path: 'x.png', reason: 'too-large', size: 99, limit: 10 * 1024 * 1024 }))
+			.toBe('larger than 10 MB');
+		expect(issueText({ path: 'x.png', reason: 'too-large', size: 99, limit: 1_572_864 }))
+			.toBe('larger than 1.5 MB');
+		// without a limit, nothing invented
+		expect(issueText({ path: 'a.md', reason: 'too-many-files', size: 0 }))
+			.toBe('too many images and files in one note; the rest were not sent');
+		expect(issueText({ path: 'x.png', reason: 'too-large', size: 99 })).toBe('larger than UCT accepts');
+		// a server sentence wins
+		expect(issueText({ path: 'x', reason: 'upload-failed', size: 0, message: 'Upgrade required' })).toBe('Upgrade required');
+	});
+});
 
 describe('shortenForDisplay', () => {
 	it('leaves a path of up to 120 characters as it is', () => {

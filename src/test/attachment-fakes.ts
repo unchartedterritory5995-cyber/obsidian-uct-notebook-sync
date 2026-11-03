@@ -99,6 +99,8 @@ export class FakeVault implements VaultSource {
 export class FakeServer implements Transport {
 	supported = true;
 	maxBytes = 26_214_400;
+	/** Sent in the check answer when set (the server's per-note ref cap). */
+	maxRefsPerNote: number | undefined = undefined;
 	remainingBytes = 1_000_000_000;
 	stored = new Set<string>();
 	checkCalls: string[][] = [];
@@ -120,6 +122,7 @@ export class FakeServer implements Transport {
 		return {
 			ok: true, supported: true, missing: p.sha256.filter((h) => !this.stored.has(h)),
 			maxBytes: this.maxBytes, remainingBytes: this.remainingBytes,
+			...(this.maxRefsPerNote === undefined ? {} : { maxRefsPerNote: this.maxRefsPerNote }),
 		};
 	}
 
