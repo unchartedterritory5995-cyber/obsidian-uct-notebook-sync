@@ -32,10 +32,24 @@ function namesExactly(dest: TFile, text: string): boolean {
 	return path === want || path.endsWith('/' + want) || fold(dest.name) === want;
 }
 
-/** `[[target|` closing the text just before an embed: a target with no `[`, `]` or `|`
- * (so nothing runs across another `[[`). It is matched against the embed's own LINE
- * only, so a target never runs across a line break or a blank line. */
-const ALIAS_HEAD_RE = /\[\[([^[\]|]+)\|$/;
+/** `[[target|` closing the text just before an embed. It is matched against the embed's
+ * own LINE only (split at `\n`), so a target never runs across a blank line.
+ *
+ * ⛔ The whole link is sent only where the server splits it back into the image and the
+ * chip (`_ALIAS_EMBED_RE` in providers/obsidian.py); a whole link it does not split
+ * claims the text and the image is lost. So every character class here is a SUBSET of
+ * the server's: on one line its `_WIKI_TARGET` excludes `]`, `|` and the stop `[[` (every
+ * other `_WIKI_STOP`, the `<` one included, starts at a `\n`). This also excludes any
+ * `[`, a `<` and a lone `\r` (a line break to Obsidian's editor): stricter is safe, a
+ * doubt sends no ref, which is 0.2.0's behaviour. Checked by a differential fuzz against
+ * the server regex (fix round 1, M1). */
+const ALIAS_HEAD_RE = /\[\[([^[\]|<\r]+)\|$/;
+
+/** An embed the server splits back out of a whole-link original, a `![[...]]` its
+ * `_WIKI_EMBED` reads, with the same subset rule as ALIAS_HEAD_RE. A markdown image
+ * (`![](img.png)`) is NOT split by the server: sent as a whole link, the image would be
+ * lost (fix round 1, I1). */
+const WIKI_EMBED_RE = /^!\[\[[^[\]|<\r\n]+(?:\|[^[\]<\r\n]+)?\]\]$/;
 
 /**
  * The link whose WHOLE alias is this embed, `[[q.pdf|![[img.png]]]]`, read from the
@@ -53,6 +67,7 @@ function embedAliasLink(body: string, e: EmbedCache): { start: number; ref: RawL
 	const start = e.position?.start?.offset;
 	const end = e.position?.end?.offset;
 	if (typeof start !== 'number' || typeof end !== 'number') return null;
+	if (!WIKI_EMBED_RE.test(e.original)) return null;
 	// A cache older than the body: its offsets no longer point at this embed.
 	if (body.slice(start, end) !== e.original) return null;
 	if (body.slice(end, end + 2) !== ']]') return null;

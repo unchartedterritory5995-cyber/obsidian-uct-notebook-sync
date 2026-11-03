@@ -193,6 +193,55 @@ describe('ObsidianVaultSource.listRawRefs: a link whose label is an embed (issue
 		}
 	});
 
+	it('a markdown image, or an embed the server would not split out, as the alias adds nothing (fix round 1, I1)', () => {
+		// The server's `_ALIAS_EMBED_RE` splits only a `![[...]]` alias off a whole-link
+		// original: sent for `![](img.png)`, the whole link would claim the text and the
+		// image would be lost (a chip, or a notice for a missing target).
+		for (const target of ['q.pdf', 'x.pdf']) {
+			const body = `x [[${target}|![](img.png)]] y\n`;
+			const { app } = fakeApp({
+				files: [tfile(SRC), tfile('att/q.pdf'), tfile('att/img.png')],
+				caches: { [SRC]: { embeds: [at(body, '![](img.png)', 'img.png')] } },
+			});
+			expect(new ObsidianVaultSource(app).listRawRefs(SRC, body), target).toEqual([
+				{ original: '![](img.png)', linkpath: 'img.png', embed: true },
+			]);
+		}
+		// a `<` in the embed stops the server's `_WIKI_EMBED`, so it would not split it either
+		for (const e of ['![[a<b.png]]', '![[img.png|<x]]']) {
+			const body = `x [[q.pdf|${e}]] y\n`;
+			expect(refsFor(body, { embeds: [at(body, e, 'x')] }), e).toEqual([{ original: e, linkpath: 'x', embed: true }]);
+		}
+		// an embed with an alias of its own is still split out by the server: sent
+		const sized = 'x [[q.pdf|![[img.png|300]]]] y\n';
+		expect(refsFor(sized, { embeds: [at(sized, '![[img.png|300]]', 'img.png')] }).filter((r) => !r.embed)).toEqual([
+			{ original: '[[q.pdf|![[img.png|300]]]]', linkpath: 'q.pdf', embed: false },
+		]);
+	});
+
+	it('a target holding `<` or a lone `\\r` adds nothing: stricter than the server, never looser (fix round 1, M1)', () => {
+		// The server splits both mid-line (its `<` stop needs a preceding `\n`), so this only
+		// gives up a chip (0.2.0's behaviour); a lone `\r` is a line break to Obsidian's editor
+		for (const body of ['x [[q<.pdf|![[img.png]]]] y\n', 'x [[q\r.pdf|![[img.png]]]] y\n']) {
+			expect(refsFor(body, { embeds: [at(body, '![[img.png]]', 'img.png')] }), JSON.stringify(body)).toEqual([
+				{ original: '![[img.png]]', linkpath: 'img.png', embed: true },
+			]);
+		}
+	});
+
+	it('reads a CRLF body and a body under frontmatter at the cached offsets (fix round 1, M4)', () => {
+		const crlf = 'first\r\nx [[q.pdf|![[img.png]]]] y\r\n\r\n[[r.pdf|![[i2.png]]]]\r\n';
+		expect(refsFor(crlf, { embeds: [at(crlf, '![[img.png]]', 'img.png'), at(crlf, '![[i2.png]]', 'i2.png')] })
+			.filter((r) => !r.embed)).toEqual([
+			{ original: '[[q.pdf|![[img.png]]]]', linkpath: 'q.pdf', embed: false },
+			{ original: '[[r.pdf|![[i2.png]]]]', linkpath: 'r.pdf', embed: false },
+		]);
+		const fm = '---\ntitle: "[[x.pdf|"\ntags: [a]\n---\n[[q.pdf|![[img.png]]]]\n';
+		expect(refsFor(fm, { embeds: [at(fm, '![[img.png]]', 'img.png')] }).filter((r) => !r.embed)).toEqual([
+			{ original: '[[q.pdf|![[img.png]]]]', linkpath: 'q.pdf', embed: false },
+		]);
+	});
+
 	it('finds two on one line, and the same text twice once', () => {
 		const body = '[[q.pdf|![[a.png]]]] and [[r.pdf|![[b.png]]]] and [[q.pdf|![[a.png]]]]\n';
 		const refs = refsFor(body, {
