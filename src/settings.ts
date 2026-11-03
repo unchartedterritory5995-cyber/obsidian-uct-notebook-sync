@@ -65,6 +65,17 @@ export function issueText(issue: AttachmentIssue): string {
 	return ATTACHMENT_REASON_TEXT[issue.reason];
 }
 
+/** Most issue rows Settings renders; the rest are counted (final review M6). */
+const MAX_ISSUE_ROWS = 200;
+
+/** The issues Settings lists: the first MAX_ISSUE_ROWS, and how many more there are, so
+ * a vault with thousands of broken links never renders thousands of rows. */
+export function visibleIssues(
+	issues: AttachmentIssue[], max = MAX_ISSUE_ROWS,
+): { shown: AttachmentIssue[]; more: number } {
+	return { shown: issues.slice(0, max), more: Math.max(0, issues.length - max) };
+}
+
 /**
  * Save a Server URL the member committed (blur or Enter): validated and normalized,
  * saved only if valid and only if it changed.
@@ -176,13 +187,15 @@ export class UctNotebookSyncSettingTab extends PluginSettingTab {
 			.setName(`Images and files that could not sync (${issues.length})`)
 			.setHeading();
 		const list = containerEl.createEl('ul');
-		for (const issue of issues) {
+		const { shown, more } = visibleIssues(issues);
+		for (const issue of shown) {
 			const text = issueText(issue);
 			// a run-wide issue (server busy) names no file
 			list.createEl('li', issue.path
 				? { text: `${shortenForDisplay(issue.path)}: ${text}`, attr: { title: issue.path } }
 				: { text });
 		}
+		if (more > 0) list.createEl('li', { text: `+${more} more` });
 	}
 
 	private renderConnected(containerEl: HTMLElement): void {

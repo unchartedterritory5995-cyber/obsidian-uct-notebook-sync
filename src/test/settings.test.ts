@@ -1,5 +1,23 @@
 import { describe, expect, it } from 'vitest';
-import { issueText, shortenForDisplay } from '../settings';
+import { issueText, shortenForDisplay, visibleIssues } from '../settings';
+import type { AttachmentIssue } from '../types';
+
+describe('visibleIssues (final review M6)', () => {
+	const many = (n: number): AttachmentIssue[] =>
+		Array.from({ length: n }, (_, i) => ({ path: `f${i}.png`, reason: 'missing', size: 0 }));
+
+	it('shows at most 200 and counts the rest', () => {
+		const { shown, more } = visibleIssues(many(5000));
+		expect(shown).toHaveLength(200);
+		expect(shown[0]!.path).toBe('f0.png');
+		expect(more).toBe(4800);
+	});
+
+	it('shows a short list whole', () => {
+		expect(visibleIssues(many(3))).toEqual({ shown: many(3), more: 0 });
+		expect(visibleIssues(many(200)).more).toBe(0);
+	});
+});
 
 describe('issueText (final review I3, M2)', () => {
 	it('builds limit texts from the server answer, never a hard-coded number', () => {
