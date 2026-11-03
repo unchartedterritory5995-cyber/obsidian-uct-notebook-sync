@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { ATTACHMENTS_NOTICE, prepareAttachments } from '../attachment-sync';
+import { describe, expect, it, vi } from 'vitest';
+import { ATTACHMENTS_NOTICE, prepareAttachments, YIELD_EVERY } from '../attachment-sync';
 import { defaultPluginData, type PluginData } from '../types';
 import { bytes, embed, FakeServer, FakeVault, shaOf, uploadFailure } from './attachment-fakes';
 
@@ -27,12 +27,12 @@ async function longestSliceMs(work: () => Promise<unknown>): Promise<number> {
 	let last = performance.now();
 	let max = 0;
 	let done = false;
-	const tick = (): void => {
+	const tick = Object.assign((): void => {
 		const now = performance.now();
 		max = Math.max(max, now - last);
 		last = now;
 		if (!done) setTimeout(tick, 0);
-	};
+	}, { ticker: true });
 	setTimeout(tick, 0);
 	await work();
 	done = true;
@@ -62,22 +62,43 @@ function bigVault(): FakeVault {
 }
 
 describe('prepareAttachments on a big vault (final review I1)', () => {
-	it('marking storage-limit over 30k refs / 5k blobs never blocks the UI for 100 ms', async () => {
+	it('yields to the UI at least every YIELD_EVERY refs, and never blocks for long, over 30k refs / 5k blobs', async () => {
 		const vault = bigVault();
-		// every blob over the member's room
-		const full = new FakeServer();
-		full.remainingBytes = 0;
-		const d1 = data();
-		const slice1 = await longestSliceMs(() => run(full, vault, d1));
-		expect(full.uploadCalls).toEqual([]);
-		// a 413 storage-full on the first upload marks the other 4999
-		const s413 = new FakeServer();
-		s413.uploadScript = [uploadFailure(413, 'Your UCT storage for imported files is full.', { storageFull: true })];
-		let r: Awaited<ReturnType<typeof run>> | undefined;
-		const slice2 = await longestSliceMs(async () => { r = await run(s413, vault, data()); });
-		expect([...r!.refsByNote.values()].flatMap((x) => x ?? []).every((x) => x.status === 'storage-limit')).toBe(true);
-		expect(slice1).toBeLessThan(100);
-		expect(slice2).toBeLessThan(100);
+		// Structural check (N4): count refs resolved between two yields. The yield is a
+		// setTimeout(0); the ticker's own setTimeouts are ignored.
+		let resolved = 0;
+		const resolve = vault.resolveRef.bind(vault);
+		vault.resolveRef = (raw) => { resolved += 1; return resolve(raw); };
+		const marks: number[] = [];
+		const realSetTimeout = globalThis.setTimeout;
+		const spy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms?: number) => {
+			if (ms === 0 && !(fn as { ticker?: boolean }).ticker) marks.push(resolved);
+			return realSetTimeout(fn, ms);
+		}) as unknown as typeof setTimeout);
+		try {
+			// every blob over the member's room
+			const full = new FakeServer();
+			full.remainingBytes = 0;
+			const slice1 = await longestSliceMs(() => run(full, vault, data()));
+			expect(full.uploadCalls).toEqual([]);
+			const points = [0, ...marks, resolved];
+			const gaps = points.slice(1).map((p, i) => p - points[i]!);
+			expect(resolved).toBe(30_000);
+			expect(Math.max(...gaps)).toBeLessThanOrEqual(YIELD_EVERY);
+
+			// a 413 storage-full on the first upload marks the other 4999
+			const s413 = new FakeServer();
+			s413.uploadScript = [uploadFailure(413, 'Your UCT storage for imported files is full.', { storageFull: true })];
+			let r: Awaited<ReturnType<typeof run>> | undefined;
+			const slice2 = await longestSliceMs(async () => { r = await run(s413, vault, data()); });
+			expect([...r!.refsByNote.values()].flatMap((x) => x ?? []).every((x) => x.status === 'storage-limit'))
+				.toBe(true);
+			// a generous wall-clock backstop (it was ~2,900 ms before the index and yields)
+			expect(slice1).toBeLessThan(1000);
+			expect(slice2).toBeLessThan(1000);
+		} finally {
+			spy.mockRestore();
+		}
 	}, 60_000);
 });
 
