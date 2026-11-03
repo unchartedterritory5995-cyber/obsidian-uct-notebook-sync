@@ -853,7 +853,11 @@ describe('SyncManager.runSync with attachments', () => {
 		expect(s1.ok).toBe(true);
 		expect(notices).toHaveLength(1);
 		expect(t.uploadCalls).toEqual([]);
-		expect(t.pushedNotes()[0]!.attachments![0]).toMatchObject({ status: 'ok', sha256: shaOf(B) });
+		// the text goes out WITHOUT a file list, at the 0.1.x hash: nothing about files
+		// has left the device before the member saw the notice
+		const first = t.pushedNotes()[0]!;
+		expect('attachments' in first).toBe(false);
+		expect(first.content_hash).toBe(sha256Hex('![[chart.png]]'));
 		expect(store.attachmentsNoticeShown).toBe(true); // survives a restart
 
 		t.reset();
@@ -866,6 +870,22 @@ describe('SyncManager.runSync with attachments', () => {
 		expect(t.uploadCalls).toHaveLength(1);
 		expect(s2.attachmentsSent).toBe(1);
 		expect(notices).toHaveLength(1);
+		// re-pushed once, now with its list
+		expect(t.pushedNotes().map((n) => n.attachments?.length)).toEqual([1]);
+	});
+
+	it('consent run: a note whose last push had a list (sync was off) is held, never pushed list-less', async () => {
+		const t = new FakeServer();
+		const vault = new FakeVault().note('a.md', '![[chart.png]]', [embed('chart.png')]).file('att/chart.png', B);
+		store = makeData({ attachmentsNoticeShown: false, syncAttachments: false });
+		const m = mgr(t, vault);
+		await m.runSync(); // toggle off: `off` refs, no notice
+		expect(t.pushedNotes()[0]!.attachments![0]!.status).toBe('off');
+		store.syncAttachments = true;
+		t.reset();
+		await m.runSync(); // the consent run
+		expect(t.pushedNotes()).toEqual([]);
+		expect(t.uploadCalls).toEqual([]);
 	});
 
 	it('settings edited during a run do not change that run (final review M4)', async () => {

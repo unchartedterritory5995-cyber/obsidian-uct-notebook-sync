@@ -253,15 +253,17 @@ describe('prepareAttachments', () => {
 				onProgress: (m) => log.push(`notice: ${m}`) },
 			['a.md'],
 		);
-		// run 1: the notice, refs sent as usual (the server shows "retrying"), 0 uploads
+		// run 1: the notice, and NOTHING about files leaves the device: no list (null, the
+		// 0.1.x hash), no check, no upload, not even a read
 		const r1 = await go(server, d);
 		expect(log).toEqual([`notice: ${ATTACHMENTS_NOTICE}`]);
 		expect(ATTACHMENTS_NOTICE).toBe(
 			'UCT Notebook Sync will now also sync the images and files your notes use — turn this off in Settings.');
-		expect(r1.refsByNote.get('a.md')).toEqual([
-			{ original: '![[a.png]]', embed: true, path: 'att/a.png', size: A.byteLength, sha256: shaOf(A), status: 'ok' },
-		]);
+		expect(r1.refsByNote.get('a.md')).toBeNull();
+		expect(r1.pending.has('a.md')).toBe(true);
+		expect(server.checkCalls).toEqual([[]]); // the probe only
 		expect(server.uploadCalls).toEqual([]);
+		expect(vault.readBinaryCalls).toEqual([]);
 		expect(d.attachmentsNoticeShown).toBe(true); // persisted with the plugin data
 
 		// run 2: uploads, no second notice

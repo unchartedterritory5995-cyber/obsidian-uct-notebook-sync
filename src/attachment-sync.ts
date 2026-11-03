@@ -155,15 +155,16 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 	}
 
 	// Consent (ruled): members who connected under 0.1.x agreed to note text. The first
-	// run that would send files TELLS them and uploads nothing; its refs go out as usual
-	// (the server shows "retrying"). Uploads start on the next run, unless the member
-	// has turned "Sync images and files" off by then. The flag is saved with the plugin
-	// data, so this happens once.
-	let consentRun = false;
+	// run that would send files TELLS them, and NOTHING about files leaves the device on
+	// that run: no list, no check, no upload, not even a read. Every note is `pending`,
+	// so its text goes out at the 0.1.x hash (or, if its last push carried a list, it is
+	// held). The next run builds the lists and uploads, unless the member has turned
+	// "Sync images and files" off by then. The flag is saved with the plugin data, so
+	// this happens once.
 	if (!offline && syncOn && !data.attachmentsNoticeShown) {
 		deps.onProgress?.(ATTACHMENTS_NOTICE);
 		data.attachmentsNoticeShown = true;
-		consentRun = true;
+		return { ...legacy(), supported: true, pending: new Set(notePaths) };
 	}
 
 	// 2. Obsidian's link index.
@@ -299,7 +300,6 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 		return result;
 	};
 	if (offline) return settle(probeBusy, !probeBusy);
-	if (consentRun) return settle(false); // nothing is checked or uploaded on the consent run
 	// sha -> its `ok` refs, built once: marking a blob storage-limit touches only that
 	// blob's refs. ⚰️ It flattened every ref of every note on each call, so a 413 on a
 	// 5k-blob, 30k-ref vault blocked the UI for ~3 s (final review I1).
