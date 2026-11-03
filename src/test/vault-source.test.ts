@@ -349,6 +349,13 @@ describe('ObsidianVaultSource.listRawRefs: a link whose label is a markdown imag
 			'[[ |![](img.png)]]',
 			'[[q.pdf|![](img.png)]] x',
 			'[[q.pdf|![](img.png)](x.png)]]',
+			// a control character or U+0085 in the destination: Python's `\s` holds them and
+			// JS's does not, so the server refuses them (fix round 1, M2)
+			'[[q.pdf|![](a\x1cb.png)]]',
+			'[[q.pdf|![](a\x1fb.png)]]',
+			'[[q.pdf|![](a\x85b.png)]]',
+			'[[q.pdf|![](a\x00b.png)]]',
+			'[[q.pdf|![](a\x7f\x01.png)]]',
 		]) {
 			const body = `x ${original} y\n`;
 			expect(refsFor(body, { links: [link(body, original, 'q.pdf')] }), original).toEqual([
@@ -597,7 +604,7 @@ describe('ObsidianVaultSource.readBinary', () => {
 // api/services/journal_two/note_connectors/convert/obsidian_fixtures_in/{18,25,26,34}-*
 // (UCT-Dashboard branch fix/obsidian-fixture-26-real-shape, 6bd900ed87, which re-pinned
 // 26 to real Obsidian 1.13.7; 18 and 25 are unchanged since feat/connector-fidelity-c-server
-// 9c50c686d3; 34 from branch fix/obsidian-md-image-alias, 8fe43568da). Each `.vault.json` names the refs the server turns into the intended images
+// 9c50c686d3; 34 from branch fix/obsidian-md-image-alias, b89458706e). Each `.vault.json` names the refs the server turns into the intended images
 // and chips. The cache entries below are what Obsidian's metadataCache gives for each note
 // (`original` exactly as written, `link` the link path, `position` its offsets in the
 // body); `size` and `sha256` are the sidecar's own, fed in by path, since those fixtures
@@ -652,6 +659,9 @@ const PARITY: Record<string, (body: string) => FakeCache> = {
 		links: [
 			at(b, '[[q.pdf|![](att/img.png)]]', 'q.pdf'),
 			at(b, '[[r.pdf|![](att/img2.png)]]', 'r.pdf'),
+			at(b, '[[Plan|![](att/img3.png)]]', 'Plan'),
+			at(b, '[[Nope|![](att/img4.png)]]', 'Nope'),
+			at(b, '[[Plan|![](https://example.com/a.png)]]', 'Plan'),
 		],
 	}),
 };

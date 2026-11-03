@@ -84,12 +84,15 @@ function embedAliasLink(body: string, e: EmbedCache): { start: number; ref: RawL
 }
 
 /** A cached LINK whose whole alias is ONE markdown image, `[[q.pdf|![alt](att/img.png)]]`
- * (issue #3). The server splits exactly that shape back into the image and the chip
- * (`_alias_md_image` in providers/obsidian.py, its `_MD_LINK_OR_IMAGE_RE` image); every
- * class here is a SUBSET of it, the target as in ALIAS_HEAD_RE: an alt with no brackets,
- * a plain destination (no `<...>` form, no title, no spaces around it). A doubt adds
- * nothing, which is 0.2.0's behaviour: the server still shows the image as written. */
-const MD_IMAGE_ALIAS_LINK_RE = /^\[\[([^[\]|<\r\n]+)\|(!\[[^[\]\r\n]*\]\(([^\s()<>]+)\))\]\]$/;
+ * (issue #3). The server splits exactly that shape back into the image and the link or
+ * chip (`_ALIAS_EMBED_RE` in providers/obsidian.py, its `_MD_LINK_OR_IMAGE_RE` image);
+ * every class here is a SUBSET of it, the target as in ALIAS_HEAD_RE: an alt with no
+ * brackets, a plain destination (no `<...>` form, no title, no spaces around it). The
+ * destination also refuses every control character and U+0085: Python's `\s` holds
+ * U+001C-U+001F and U+0085 and JS's does not, so `[^\s]` alone accepted a name the server
+ * refuses (fix round 1, M2). A doubt adds nothing, which is 0.2.0's behaviour: the server
+ * still shows the image as written. */
+const MD_IMAGE_ALIAS_LINK_RE = /^\[\[([^[\]|<\r\n]+)\|(!\[[^[\]\r\n]*\]\(([^\s\x00-\x20\x85()<>]+)\))\]\]$/;
 
 /**
  * The embed ref for the image a link's whole alias is, `{original: '![alt](dest)',
