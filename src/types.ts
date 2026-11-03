@@ -104,7 +104,8 @@ export interface AttachmentIssue {
 	 * be sent. `too-many-files`: a note past the server's per-note ref cap (one issue per
 	 * note). */
 	reason: 'too-large' | 'missing' | 'storage-limit' | 'upload-failed' | 'link-too-long' | 'too-many-files'
-		| 'note-too-large-for-files' | 'server-busy' | 'waiting-for-index' | 'pushed-without-files';
+		| 'note-too-large-for-files' | 'server-busy' | 'waiting-for-index' | 'pushed-without-files'
+		| 'check-failing';
 	size: number;
 	/** The server's own sentence, when one failure stands for the whole run (a 403). */
 	message?: string;
@@ -175,6 +176,8 @@ export interface PluginData {
 	attachmentServer: { maxBytes: number; maxRefsPerNote?: number } | null;
 	/** Consecutive runs the server answered busy (429/503) to blob uploads. */
 	attachmentBusyRuns: number;
+	/** Consecutive offline runs for any other reason (a refused or failing check). */
+	attachmentCheckFailRuns: number;
 }
 
 /**
@@ -218,5 +221,6 @@ export function defaultPluginData(vaultId: string): PluginData {
 		attachmentsNoticeShown: false,
 		attachmentServer: null,
 		attachmentBusyRuns: 0,
+		attachmentCheckFailRuns: 0,
 	};
 }

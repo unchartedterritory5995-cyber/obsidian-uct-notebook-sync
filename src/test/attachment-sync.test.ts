@@ -199,6 +199,46 @@ describe('prepareAttachments', () => {
 		expect((await run(flaky, vault, d)).refsByNote.get('a.md')).toBeNull();
 	});
 
+	it('a 404 after a supported run is legacy, never offline (final review I4)', async () => {
+		const vault = new FakeVault().note('a.md', '![[a.png]]', [embed('a.png')]).file('att/a.png', A);
+		const d = data();
+		await run(new FakeServer(), vault, d);
+		expect(d.attachmentServer).not.toBeNull();
+		// the transport maps 404/405/a non-protocol 2xx to `supported: false`
+		const off = new FakeServer();
+		off.checkScript = [{ ok: true, supported: false }];
+		const r = await run(off, vault, d);
+		expect(r.supported).toBe(false);
+		expect(r.refsByNote.get('a.md')).toBeNull();
+		expect(d.attachmentServer).toBeNull();
+		expect(r.issues).toEqual([]);
+	});
+
+	it('a check refused (403) run after run goes offline and shows a Settings issue from the 3rd run (final review I4)', async () => {
+		const vault = new FakeVault().note('a.md', '![[a.png]]', [embed('a.png')]).file('att/a.png', A);
+		const d = data();
+		await run(new FakeServer(), vault, d);
+		const refused = () => {
+			const s = new FakeServer();
+			s.checkScript = [{ ok: false, status: 403, message: 'Upgrade required', authExpired: false }];
+			return run(s, vault, d);
+		};
+		const failing = { path: '', reason: 'check-failing', size: 0 };
+		const r1 = await refused();
+		expect(r1.supported).toBe(true); // offline: refs kept, nothing uploaded
+		expect(r1.issues).toEqual([]);
+		expect((await refused()).issues).toEqual([]);
+		expect((await refused()).issues).toEqual([failing]);
+		expect((await refused()).issues).toEqual([failing]);
+		// busy (429/503) has its own issue, never both
+		const busy = new FakeServer();
+		busy.checkScript = [{ ok: false, status: 503, message: 'busy', authExpired: false }];
+		expect((await run(busy, vault, d)).issues.map((i) => i.reason)).not.toContain('check-failing');
+		// a good run clears it
+		expect((await run(new FakeServer(), vault, d)).issues).toEqual([]);
+		expect((await refused()).issues).toEqual([]);
+	});
+
 	it('stops uploading at the per-run time or byte budget; the next run continues (I3)', async () => {
 		const vault = new FakeVault();
 		const refs = [];

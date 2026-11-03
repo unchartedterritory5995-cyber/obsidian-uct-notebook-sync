@@ -267,12 +267,17 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 	// A server too busy to take blobs (429/503) is only "retrying" in the note. After
 	// BUSY_RUNS_FOR_ISSUE runs in a row it is also a Settings issue (review M4); any
 	// run that is not busy resets the count.
-	const settle = (busy: boolean): PrepareResult => {
+	// Likewise an offline run for any OTHER reason (a 403, a 500, the network): never
+	// silent forever. Its own count and issue, so one cause never shows two (final
+	// review I4).
+	const settle = (busy: boolean, checkFailing = false): PrepareResult => {
 		data.attachmentBusyRuns = busy ? data.attachmentBusyRuns + 1 : 0;
+		data.attachmentCheckFailRuns = checkFailing ? data.attachmentCheckFailRuns + 1 : 0;
 		if (data.attachmentBusyRuns >= BUSY_RUNS_FOR_ISSUE) addIssue({ path: '', reason: 'server-busy', size: 0 });
+		if (data.attachmentCheckFailRuns >= BUSY_RUNS_FOR_ISSUE) addIssue({ path: '', reason: 'check-failing', size: 0 });
 		return result;
 	};
-	if (offline) return settle(probeBusy);
+	if (offline) return settle(probeBusy, !probeBusy);
 	// sha -> its `ok` refs, built once: marking a blob storage-limit touches only that
 	// blob's refs. ⚰️ It flattened every ref of every note on each call, so a 413 on a
 	// 5k-blob, 30k-ref vault blocked the UI for ~3 s (final review I1).

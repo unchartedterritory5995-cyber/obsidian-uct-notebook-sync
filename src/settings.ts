@@ -37,6 +37,8 @@ const ATTACHMENT_REASON_TEXT: Record<Exclude<AttachmentIssue['reason'], 'too-lar
 	'server-busy': 'UCT is busy and is not taking images and files right now; will keep retrying',
 	'waiting-for-index': 'waiting for Obsidian to index this note; its changes will sync once it has',
 	'pushed-without-files': 'pushed without its images and files; Obsidian has not indexed it yet',
+	'check-failing':
+		'UCT has not accepted images and files for several syncs; notes still sync, and files will follow once it does',
 };
 
 function megabytes(bytes: number): string {
