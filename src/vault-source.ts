@@ -40,6 +40,15 @@ export class ObsidianVaultSource implements VaultSource {
 	 * note re-pushes once with its refs when it is indexed. */
 	private indexingSettled = false;
 
+	/** Pending metadata waits, so unloading the plugin can end them (final review M3):
+	 * each removes its 'resolved' listener and its timer as it ends. */
+	private readonly waits = new Set<() => void>();
+
+	/** End every pending metadata wait now. Called from the plugin's `onunload`. */
+	cancelWaits(): void {
+		for (const finish of [...this.waits]) finish();
+	}
+
 	constructor(private readonly app: App) {}
 
 	async listMarkdownFiles(): Promise<VaultFileRef[]> {
@@ -70,6 +79,7 @@ export class ObsidianVaultSource implements VaultSource {
 			const finish = (): void => {
 				if (done) return;
 				done = true;
+				this.waits.delete(finish);
 				this.indexingSettled = true;
 				clearTimeout(timer);
 				cache.offref(ref);
@@ -77,6 +87,7 @@ export class ObsidianVaultSource implements VaultSource {
 			};
 			const ref = cache.on('resolved', finish);
 			const timer = setTimeout(finish, timeoutMs);
+			this.waits.add(finish);
 		});
 	}
 

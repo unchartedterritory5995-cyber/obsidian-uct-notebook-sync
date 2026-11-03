@@ -20,6 +20,7 @@ export default class UctNotebookSyncPlugin extends Plugin {
 	private transport = new ObsidianHttpTransport();
 	private syncManager!: SyncManager;
 	private settingTab!: UctNotebookSyncSettingTab;
+	private vaultSource?: ObsidianVaultSource;
 	/** After this long, a running sync shows a "syncing" notice. */
 	private syncingNoticeDelayMs = 3000;
 	private syncing = false;
@@ -27,9 +28,10 @@ export default class UctNotebookSyncPlugin extends Plugin {
 	async onload(): Promise<void> {
 		await this.loadPluginData();
 
+		this.vaultSource = new ObsidianVaultSource(this.app);
 		this.syncManager = new SyncManager({
 			transport: this.transport,
-			vaultSource: new ObsidianVaultSource(this.app),
+			vaultSource: this.vaultSource,
 			getData: () => this.data,
 			saveData: (data) => this.saveData(data),
 			onProgress: (message) => { new Notice(message); },
@@ -56,6 +58,10 @@ export default class UctNotebookSyncPlugin extends Plugin {
 	}
 
 	onunload(): void {
+		// A running sync stops at its next checkpoint and a pending metadata wait ends
+		// with its listener removed (final review M3).
+		this.syncManager?.abort();
+		this.vaultSource?.cancelWaits();
 		// The hash cache is written into `data` as files are hashed: saving here keeps a
 		// sync cut short by closing Obsidian from re-reading those files (final review I2).
 		if (this.data) void this.saveData(this.data);

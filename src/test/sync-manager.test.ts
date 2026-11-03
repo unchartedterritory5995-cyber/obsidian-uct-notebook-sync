@@ -383,6 +383,25 @@ describe('SyncManager.runSync', () => {
 	});
 });
 
+describe('SyncManager.abort (final review M3)', () => {
+	it('an abort (plugin unloaded) stops the run before its next request', async () => {
+		const t = new FakeServer();
+		const vault = new FakeVault().note('a.md', '# a', []).note('b.md', '# b', []);
+		const data = makeData();
+		let m!: SyncManager;
+		const realIngest = t.ingest.bind(t);
+		t.ingest = async (p) => { const out = await realIngest(p); m.abort(); return out; };
+		m = new SyncManager({
+			transport: t, vaultSource: vault, getData: () => data, saveData: async () => {},
+			batchOptions: { maxNotes: 1, maxBytes: 1_000_000 },
+		});
+		const s = await m.runSync();
+		expect(s.ok).toBe(false);
+		expect(s.error).toMatch(/stopped/i);
+		expect(t.ingestCalls).toHaveLength(1); // no second batch, no manifest
+	});
+});
+
 describe('SyncManager token origin (final review I6)', () => {
 	it('never sends the token to an origin other than the one it was redeemed against', async () => {
 		const t = new FakeServer();

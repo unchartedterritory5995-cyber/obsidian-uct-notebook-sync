@@ -308,6 +308,21 @@ describe('ObsidianVaultSource.whenMetadataReady after indexing finished (M3)', (
 	});
 });
 
+describe('ObsidianVaultSource.cancelWaits (final review M3)', () => {
+	it('ends a pending metadata wait at once and removes its listener', async () => {
+		const f = fakeApp({ files: [tfile('a.md'), tfile('b.md')], caches: { 'a.md': { links: [] }, 'b.md': null } });
+		const vs = new ObsidianVaultSource(f.app);
+		const t0 = Date.now();
+		const p = vs.whenMetadataReady(60_000);
+		await Promise.resolve();
+		expect(f.listenerCount('resolved')).toBe(1);
+		vs.cancelWaits();
+		await p;
+		expect(Date.now() - t0).toBeLessThan(1000);
+		expect(f.listenerCount('resolved')).toBe(0);
+	});
+});
+
 describe('ObsidianVaultSource.readBinary', () => {
 	it('reads a TFile and refuses anything else', async () => {
 		const buf = new Uint8Array([1, 2, 3]).buffer;

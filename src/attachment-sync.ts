@@ -75,6 +75,8 @@ export interface PrepareDeps {
 	saveProgress?: () => Promise<void>;
 	/** Shown once when a run has many files to prepare. */
 	onProgress?: (message: string) => void;
+	/** True once the plugin is unloading: hashing and uploads stop (final review M3). */
+	shouldStop?: () => boolean;
 }
 
 export interface PrepareResult {
@@ -229,7 +231,7 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 				if (cached && cached.mtime === file.mtime && cached.size === file.size) {
 					sha = cached.sha256;
 				} else {
-					if (clock() - hashStarted >= hashBudgetMs) {
+					if (clock() - hashStarted >= hashBudgetMs || deps.shouldStop?.()) {
 						// out of hashing time: this note waits for the next run
 						pending.add(notePath);
 						refsByNote.set(notePath, null);
@@ -327,6 +329,7 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 	for (let i = 0; i < missing.length; i++) {
 		await step();
 		if (clock() - started >= budget.ms || sentBytes >= budget.bytes) break; // later runs go on
+		if (deps.shouldStop?.()) break;
 		const sha = missing[i]!;
 		const f = firstFile.get(sha);
 		if (!f) continue;

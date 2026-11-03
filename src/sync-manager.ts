@@ -49,6 +49,7 @@ import {
 export const MAX_DEFERRED_RUNS = 3;
 
 export const SERVER_CHANGED_MESSAGE = 'Server address changed — reconnect to sync';
+export const STOPPED_MESSAGE = 'Sync stopped: the plugin was turned off or Obsidian closed.';
 import { noteContentHash } from './attachment-refs';
 import { prepareAttachments } from './attachment-sync';
 import { applySyncResult, finalizeManifest, planSync } from './sync-plan';
@@ -119,7 +120,16 @@ function isoNow(): string {
 }
 
 export class SyncManager {
+	private aborted = false;
+
 	constructor(private readonly deps: SyncManagerDeps) {}
+
+	/** The plugin is unloading: a running sync sends no further request (final review
+	 * M3). It stops at its next checkpoint, before a batch or the manifest; a note
+	 * batch already in flight completes. */
+	abort(): void {
+		this.aborted = true;
+	}
 
 	async runSync(): Promise<SyncSummary> {
 		const data = this.deps.getData();
@@ -175,6 +185,7 @@ export class SyncManager {
 				clock: this.deps.clock,
 				saveProgress: () => this.deps.saveData(data),
 				onProgress: this.deps.onProgress,
+				shouldStop: () => this.aborted,
 			},
 			files.map((f) => f.path),
 		);
@@ -291,7 +302,9 @@ export class SyncManager {
 			});
 		};
 
+		if (this.aborted) return fail(STOPPED_MESSAGE, false);
 		for (const batch of batches) {
+			if (this.aborted) return fail(STOPPED_MESSAGE, false);
 			const outcome = await this.deps.transport.ingest({
 				serverUrl: data.serverUrl,
 				token: deviceToken,
@@ -305,6 +318,7 @@ export class SyncManager {
 
 		const finalManifest = finalizeManifest(plan.manifestPaths, tooLargeThisRun, plan.neverStagedPaths);
 		let manifestSent = false;
+		if (this.aborted) return fail(STOPPED_MESSAGE, false);
 		if (finalManifest.length > 0) {
 			const outcome = await this.deps.transport.ingest({
 				serverUrl: data.serverUrl,
