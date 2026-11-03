@@ -56,6 +56,9 @@ export const SAVE_EVERY_HASHES = 200;
 export const PROGRESS_NOTICE_AFTER = 100;
 export const PREPARING_MESSAGE = 'UCT Notebook Sync: preparing the images and files your notes use…';
 
+export const ATTACHMENTS_NOTICE =
+	'UCT Notebook Sync now also sends the images and files your notes use. You can turn this off in its settings.';
+
 export const UPLOAD_BUDGET_MS = 60_000;
 export const UPLOAD_BUDGET_BYTES = 100 * 1024 * 1024;
 
@@ -149,6 +152,13 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 		maxRefs = probe.maxRefsPerNote ?? DEFAULT_MAX_REFS_PER_NOTE;
 		remainingBytes = probe.remainingBytes;
 		data.attachmentServer = { maxBytes, maxRefsPerNote: maxRefs };
+	}
+
+	// The member is told BEFORE anything is uploaded, on the first run that will send
+	// files (final review M7): members who connected under 0.1.x agreed to note text.
+	if (!offline && syncOn && !data.attachmentsNoticeShown) {
+		deps.onProgress?.(ATTACHMENTS_NOTICE);
+		data.attachmentsNoticeShown = true;
 	}
 
 	// 2. Obsidian's link index.

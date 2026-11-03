@@ -133,8 +133,9 @@ describe('prepareAttachments hashing budget and progress (final review I2)', () 
 			Object.keys(vault.notes),
 		);
 		expect(snapshots).toEqual([200, 400]);
-		expect(progress).toHaveLength(1); // one "preparing" notice on a long run
-		expect(progress[0]).toMatch(/images and files/i);
+		const preparing = progress.filter((m) => /preparing/i.test(m));
+		expect(preparing).toHaveLength(1); // one "preparing" notice on a long run
+		expect(preparing[0]).toMatch(/images and files/i);
 
 		// the run "died" after the last save: a restart hashes only the 50 not saved
 		vault.readBinaryCalls = [];
@@ -237,6 +238,40 @@ describe('prepareAttachments', () => {
 		// a good run clears it
 		expect((await run(new FakeServer(), vault, d)).issues).toEqual([]);
 		expect((await refused()).issues).toEqual([]);
+	});
+
+	it('the one-time "now sends images and files" notice comes BEFORE the first upload (final review M7)', async () => {
+		const vault = new FakeVault().note('a.md', '![[a.png]]', [embed('a.png')]).file('att/a.png', A);
+		const log: string[] = [];
+		const server = new FakeServer();
+		server.onUpload = () => log.push('upload');
+		const d = data();
+		const go = (s: FakeServer, dd: PluginData) => prepareAttachments(
+			{ transport: s, vaultSource: vault, data: dd, serverUrl: 'https://x.test', token: 't',
+				onProgress: (m) => log.push(`notice: ${m}`) },
+			['a.md'],
+		);
+		await go(server, d);
+		expect(log).toEqual([
+			'notice: UCT Notebook Sync now also sends the images and files your notes use. You can turn this off in its settings.',
+			'upload',
+		]);
+		expect(d.attachmentsNoticeShown).toBe(true);
+
+		log.length = 0;
+		vault.file('att/a.png', B, 2); // a new blob to upload: still no second notice
+		await go(server, d);
+		expect(log).toEqual(['upload']);
+
+		// not on a text-only server, and not with the toggle off
+		const old = new FakeServer();
+		old.supported = false;
+		const d2 = data();
+		log.length = 0;
+		await go(old, d2);
+		await go(new FakeServer(), data({ syncAttachments: false }));
+		expect(log).toEqual([]);
+		expect(d2.attachmentsNoticeShown).toBe(false);
 	});
 
 	it('stops uploading at the per-run time or byte budget; the next run continues (I3)', async () => {

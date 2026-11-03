@@ -144,15 +144,8 @@ export default class UctNotebookSyncPlugin extends Plugin {
 				clearTimeout(syncingNotice);
 			}
 			new Notice(summarize(summary));
-			if (summary.ok && summary.attachmentsSupported && this.data.syncAttachments
-				&& !this.data.attachmentsNoticeShown) {
-				new Notice(
-					'UCT Notebook Sync now also sends the images and files your notes use. ' +
-					'You can turn this off in its settings.',
-				);
-				this.data.attachmentsNoticeShown = true;
-				await this.saveData(this.data);
-			}
+			// (the one-time "now also sends images and files" notice is shown by the run
+			// itself, before its first upload: attachment-sync.ts, final review M7)
 			this.settingTab.refreshIfOpen();
 			return summary;
 		} finally {
