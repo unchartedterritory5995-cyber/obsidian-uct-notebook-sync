@@ -836,6 +836,18 @@ describe('SyncManager.runSync with attachments', () => {
 		expect(store.attachmentIssues.filter((i) => i.reason === 'waiting-for-index')).toEqual([]);
 	});
 
+	it('settings edited during a run do not change that run (final review M4)', async () => {
+		const t = new FakeServer();
+		const vault = new FakeVault()
+			.note('a.md', 'x', [embed('p.png'), embed('q.png')])
+			.file('att/p.png', bytes('p')).file('att/q.png', bytes('q'));
+		const original = store.serverUrl;
+		vault.onRead = () => { store.syncAttachments = false; store.serverUrl = 'https://elsewhere.example'; };
+		await mgr(t, vault).runSync();
+		expect(t.pushedNotes()[0]!.attachments!.map((r) => r.status)).toEqual(['ok', 'ok']); // never mixed
+		for (const c of t.ingestCalls) expect(c.serverUrl).toBe(original);
+	});
+
 	it('a 403 on upload stops uploads but the notes are still pushed', async () => {
 		const t = new FakeServer();
 		t.uploadScript = [uploadFailure(403, 'Upgrade required')];

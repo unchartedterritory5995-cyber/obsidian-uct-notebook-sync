@@ -75,6 +75,8 @@ export interface PrepareDeps {
 	saveProgress?: () => Promise<void>;
 	/** Shown once when a run has many files to prepare. */
 	onProgress?: (message: string) => void;
+	/** The "Sync images and files" toggle as the run read it at its start. */
+	syncAttachments?: boolean;
 	/** True once the plugin is unloading: hashing and uploads stop (final review M3). */
 	shouldStop?: () => boolean;
 }
@@ -106,6 +108,8 @@ function yieldToUi(): Promise<void> {
 
 export async function prepareAttachments(deps: PrepareDeps, notePaths: string[]): Promise<PrepareResult> {
 	const { transport, vaultSource, data, serverUrl, token } = deps;
+	// the run's snapshot of the toggle (final review M4); the live value otherwise
+	const syncOn = deps.syncAttachments ?? data.syncAttachments;
 	const legacy = (): PrepareResult => ({
 		supported: false,
 		refsByNote: new Map(notePaths.map((p) => [p, null])),
@@ -212,7 +216,7 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 			}
 			const { file } = c;
 			const base = { original: raw.original, embed: raw.embed, path: file.path, size: file.size };
-			if (!data.syncAttachments) {
+			if (!syncOn) {
 				refs.push({ ...base, sha256: null, status: 'off' });
 				// Keep a referenced file's cache entry while sync is off, so turning it
 				// back on does not re-read every binary (review M2).

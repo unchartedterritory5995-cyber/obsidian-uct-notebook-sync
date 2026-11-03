@@ -169,6 +169,12 @@ export class SyncManager {
 			await this.deps.saveData(data);
 			return empty({ error: SERVER_CHANGED_MESSAGE });
 		}
+		// Settings are read ONCE per run (final review M4): an edit in the Settings tab
+		// while a run is going applies to the next run, never half of this one (a toggle
+		// flipped mid-hash would mix `off` and `ok` refs; a URL edited mid-run would point
+		// the later batches and the manifest elsewhere).
+		const serverUrl = data.serverUrl;
+		const syncAttachments = data.syncAttachments;
 
 		const now = (this.deps.now ?? isoNow)();
 		const files = await this.deps.vaultSource.listMarkdownFiles();
@@ -180,8 +186,9 @@ export class SyncManager {
 				transport: this.deps.transport,
 				vaultSource: this.deps.vaultSource,
 				data,
-				serverUrl: data.serverUrl,
+				serverUrl,
 				token: deviceToken,
+				syncAttachments,
 				clock: this.deps.clock,
 				saveProgress: () => this.deps.saveData(data),
 				onProgress: this.deps.onProgress,
@@ -306,7 +313,7 @@ export class SyncManager {
 		for (const batch of batches) {
 			if (this.aborted) return fail(STOPPED_MESSAGE, false);
 			const outcome = await this.deps.transport.ingest({
-				serverUrl: data.serverUrl,
+				serverUrl,
 				token: deviceToken,
 				notes: batch,
 				final: false,
@@ -321,7 +328,7 @@ export class SyncManager {
 		if (this.aborted) return fail(STOPPED_MESSAGE, false);
 		if (finalManifest.length > 0) {
 			const outcome = await this.deps.transport.ingest({
-				serverUrl: data.serverUrl,
+				serverUrl,
 				token: deviceToken,
 				notes: [],
 				manifest: finalManifest,
