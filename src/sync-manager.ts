@@ -73,8 +73,10 @@ export interface VaultSource {
 	whenMetadataReady(timeoutMs: number): Promise<void>;
 	/** Obsidian has a metadata cache for this note (it has been indexed). */
 	isIndexed(notePath: string): boolean;
-	/** A note's embeds and links as Obsidian's cache records them; `[]` while unindexed. */
-	listRawRefs(notePath: string): RawLinkRef[];
+	/** A note's embeds and links as Obsidian's cache records them; `[]` while unindexed.
+	 * Given the note's `body`, also the link whose whole label is an embed
+	 * (`[[q.pdf|![[img.png]]]]`), which the cache does not report (issue #2). */
+	listRawRefs(notePath: string, body?: string): RawLinkRef[];
 	/** The vault file a link names, by Obsidian's own resolver, or null. */
 	resolveLink(linkpath: string, sourcePath: string): ResolvedFile | null;
 	/** `resolveLink(raw.linkpath)`, then, for a markdown-form ref only, one retry with

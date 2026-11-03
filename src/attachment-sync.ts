@@ -204,7 +204,15 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 		}
 		const refs: NoteAttachmentRef[] = [];
 		let overflow = false;
-		for (const raw of vaultSource.listRawRefs(notePath)) {
+		// The body lets listRawRefs find `[[q.pdf|![[img.png]]]]`, a link Obsidian's cache
+		// does not report (issue #2). A note that cannot be read gets the cache's refs only.
+		let body: string | undefined;
+		try {
+			body = await vaultSource.readFile(notePath);
+		} catch {
+			body = undefined;
+		}
+		for (const raw of vaultSource.listRawRefs(notePath, body)) {
 			await step();
 			const c = classifyRef(raw, vaultSource.resolveRef(raw, notePath));
 			if (c.kind === 'skip') continue;

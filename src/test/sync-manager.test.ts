@@ -32,7 +32,7 @@ class FakeVaultSource implements VaultSource {
 	// every note indexed and holding no links.
 	async whenMetadataReady(): Promise<void> {}
 	isIndexed(): boolean { return true; }
-	listRawRefs(): RawLinkRef[] { return []; }
+	listRawRefs(_notePath: string, _body?: string): RawLinkRef[] { return []; }
 	resolveLink(): ResolvedFile | null { return null; }
 	resolveRef(): ResolvedFile | null { return null; }
 	async readBinary(path: string): Promise<ArrayBuffer> { throw new Error(`no binary: ${path}`); }

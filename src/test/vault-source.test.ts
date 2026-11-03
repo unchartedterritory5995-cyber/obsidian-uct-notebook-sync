@@ -7,8 +7,25 @@ import { ObsidianVaultSource } from '../vault-source';
 import { classifyRef } from '../attachment-refs';
 import type { NoteAttachmentRef } from '../types';
 
-interface CacheEntry { original: string; link: string }
+interface Loc { line: number; col: number; offset: number }
+interface CacheEntry { original: string; link: string; position?: { start: Loc; end: Loc } }
 interface FakeCache { embeds?: CacheEntry[]; links?: CacheEntry[] }
+
+/** A cache entry for the `nth` (0-based) occurrence of `original` in `body`, with the
+ * position real Obsidian gives (`offset` is what the plugin reads). */
+function at(body: string, original: string, link: string, nth = 0): CacheEntry {
+	let start = -1;
+	for (let i = 0; i <= nth; i++) {
+		start = body.indexOf(original, start + 1);
+		if (start < 0) throw new Error(`fixture: ${original} #${nth} not in body`);
+	}
+	const loc = (offset: number): Loc => {
+		const before = body.slice(0, offset);
+		const line = before.split('\n').length - 1;
+		return { line, col: offset - (before.lastIndexOf('\n') + 1), offset };
+	};
+	return { original, link, position: { start: loc(start), end: loc(start + original.length) } };
+}
 
 function tfile(p: string, size = 0, mtime = 1): TFile {
 	const f = new TFile();
@@ -97,6 +114,130 @@ describe('ObsidianVaultSource.listRawRefs', () => {
 			{ original: '[[Other note]]', linkpath: 'Other note', embed: false },
 		]);
 		expect(vs.listRawRefs('nope.md')).toEqual([]);
+	});
+});
+
+describe('ObsidianVaultSource.listRawRefs: a link whose label is an embed (issue #2)', () => {
+	// Real Obsidian 1.13.7 caches ONLY the embed for `[[q.pdf|![[img.png]]]]`: no
+	// LinkCache entry at all. Given the note body, listRawRefs adds the whole link as a
+	// non-embed ref, found from the embed's own cached position.
+	const refsFor = (body: string, cache: FakeCache, files: TFile[] = []) => {
+		const { app } = fakeApp({ files: [tfile(SRC), ...files], caches: { [SRC]: cache } });
+		return new ObsidianVaultSource(app).listRawRefs(SRC, body);
+	};
+
+	it('adds the whole-link ref beside the embed ref', () => {
+		const body = 'x [[q.pdf|![[img.png]]]] y\n';
+		expect(refsFor(body, { embeds: [at(body, '![[img.png]]', 'img.png')] })).toEqual([
+			{ original: '![[img.png]]', linkpath: 'img.png', embed: true },
+			{ original: '[[q.pdf|![[img.png]]]]', linkpath: 'q.pdf', embed: false },
+		]);
+	});
+
+	it('classifies the added ref: an existing pdf is a file, a missing one missing, a note skipped', () => {
+		const body = 'a [[q.pdf|![[i1.png]]]]\nb [[x.pdf|![[i2.png]]]]\nc [[Plan|![[i3.png]]]]\n';
+		const files = [tfile('att/q.pdf', 9), tfile('att/i1.png'), tfile('att/i2.png'), tfile('att/i3.png'), tfile('Plan.md')];
+		const { app } = fakeApp({
+			files: [tfile(SRC), ...files],
+			caches: {
+				[SRC]: {
+					embeds: [at(body, '![[i1.png]]', 'i1.png'), at(body, '![[i2.png]]', 'i2.png'), at(body, '![[i3.png]]', 'i3.png')],
+				},
+			},
+		});
+		const vs = new ObsidianVaultSource(app);
+		const links = vs.listRawRefs(SRC, body).filter((r) => !r.embed);
+		expect(links.map((r) => r.original)).toEqual([
+			'[[q.pdf|![[i1.png]]]]', '[[x.pdf|![[i2.png]]]]', '[[Plan|![[i3.png]]]]',
+		]);
+		const kinds = links.map((r) => classifyRef(r, vs.resolveRef(r, SRC)));
+		expect(kinds[0]).toMatchObject({ kind: 'file', file: { path: 'att/q.pdf', size: 9 } });
+		expect(kinds[1]).toEqual({
+			kind: 'missing',
+			ref: { original: '[[x.pdf|![[i2.png]]]]', embed: false, path: 'x.pdf', size: 0, sha256: null, status: 'missing' },
+		});
+		expect(kinds[2]).toEqual({ kind: 'skip' });
+	});
+
+	it('keeps the target as written: whitespace and an #anchor', () => {
+		const body = 'x [[ q.pdf |![[img.png]]]] and [[q.pdf#page=2|![[img2.png]]]]\n';
+		const refs = refsFor(body, { embeds: [at(body, '![[img.png]]', 'img.png'), at(body, '![[img2.png]]', 'img2.png')] });
+		expect(refs.filter((r) => !r.embed)).toEqual([
+			{ original: '[[ q.pdf |![[img.png]]]]', linkpath: ' q.pdf ', embed: false },
+			{ original: '[[q.pdf#page=2|![[img2.png]]]]', linkpath: 'q.pdf#page=2', embed: false },
+		]);
+		const { app } = fakeApp({ files: [tfile('att/q.pdf')], caches: {} });
+		const vs = new ObsidianVaultSource(app);
+		for (const r of refs.filter((x) => !x.embed)) expect(vs.resolveRef(r, SRC)?.path).toBe('att/q.pdf');
+	});
+
+	it('only an alias that is EXACTLY the embed counts', () => {
+		for (const body of [
+			'[[a]] ![[img.png]]\n', // a plain link, then an embed
+			'[[q.pdf| x ![[img.png]]]]\n', // the embed is part of a longer alias
+			'[[q.pdf|![[img.png]] x]]\n', // text after the embed
+			'[[q.pdf|![[img.png]]\n', // never closed
+			'[[q.pdf|![[img.png]]]\n', // one `]` short
+			'[[|![[img.png]]]]\n', // no target
+			'[[  |![[img.png]]]]\n', // a blank target
+			'[[a|b|![[img.png]]]]\n', // a `|` in the target
+			'[[a]b|![[img.png]]]]\n', // a `]` in the target
+			'[[a[b|![[img.png]]]]\n', // a `[` in the target
+			'[[q.pdf\n|![[img.png]]]]\n', // the link runs across a line
+			'[[q.pdf\n\n|![[img.png]]]]\n', // ... or a blank line
+			'![[q.pdf|![[img.png]]]]\n', // an EMBED whose alias is an embed: not a link
+		]) {
+			expect(refsFor(body, { embeds: [at(body, '![[img.png]]', 'img.png')] }), body).toEqual([
+				{ original: '![[img.png]]', linkpath: 'img.png', embed: true },
+			]);
+		}
+	});
+
+	it('finds two on one line, and the same text twice once', () => {
+		const body = '[[q.pdf|![[a.png]]]] and [[r.pdf|![[b.png]]]] and [[q.pdf|![[a.png]]]]\n';
+		const refs = refsFor(body, {
+			embeds: [at(body, '![[a.png]]', 'a.png'), at(body, '![[b.png]]', 'b.png'), at(body, '![[a.png]]', 'a.png', 1)],
+		});
+		expect(refs).toEqual([
+			{ original: '![[a.png]]', linkpath: 'a.png', embed: true },
+			{ original: '![[b.png]]', linkpath: 'b.png', embed: true },
+			{ original: '[[q.pdf|![[a.png]]]]', linkpath: 'q.pdf', embed: false },
+			{ original: '[[r.pdf|![[b.png]]]]', linkpath: 'r.pdf', embed: false },
+		]);
+	});
+
+	it('adds nothing when Obsidian already cached a link starting at that [[', () => {
+		const body = 'x [[q.pdf|![[img.png]]]] y\n';
+		const cut = at(body, '[[q.pdf|![[img.png]]', 'q.pdf'); // a future cache's own shape
+		expect(refsFor(body, { embeds: [at(body, '![[img.png]]', 'img.png')], links: [cut] })).toEqual([
+			{ original: '![[img.png]]', linkpath: 'img.png', embed: true },
+			{ original: '[[q.pdf|![[img.png]]', linkpath: 'q.pdf', embed: false },
+		]);
+		// a cached link elsewhere on the line does not suppress it
+		const body2 = '[[b]] [[q.pdf|![[img.png]]]]\n';
+		expect(refsFor(body2, { embeds: [at(body2, '![[img.png]]', 'img.png')], links: [at(body2, '[[b]]', 'b')] }))
+			.toEqual([
+				{ original: '![[img.png]]', linkpath: 'img.png', embed: true },
+				{ original: '[[b]]', linkpath: 'b', embed: false },
+				{ original: '[[q.pdf|![[img.png]]]]', linkpath: 'q.pdf', embed: false },
+			]);
+	});
+
+	it('inspects nothing without a body, a position, or a position that still points at the embed', () => {
+		const body = 'x [[q.pdf|![[img.png]]]] y\n';
+		const embedOnly = [{ original: '![[img.png]]', linkpath: 'img.png', embed: true }];
+		// no body: exactly the 0.2.0 refs
+		{
+			const { app } = fakeApp({ files: [tfile(SRC)], caches: { [SRC]: { embeds: [at(body, '![[img.png]]', 'img.png')] } } });
+			expect(new ObsidianVaultSource(app).listRawRefs(SRC)).toEqual(embedOnly);
+		}
+		// an embed with no position
+		expect(refsFor(body, { embeds: [{ original: '![[img.png]]', link: 'img.png' }] })).toEqual(embedOnly);
+		// a cache older than the body: the offsets no longer point at the embed
+		expect(refsFor('xy' + body, { embeds: [at(body, '![[img.png]]', 'img.png')] })).toEqual(embedOnly);
+		// ... even where the body there still has the alias shape around other text
+		const edited = 'x [[q.pdf|![[new.png]]]] y\n';
+		expect(refsFor(edited, { embeds: [at(body, '![[img.png]]', 'img.png')] })).toEqual(embedOnly);
 	});
 });
 
@@ -337,13 +478,19 @@ describe('ObsidianVaultSource.readBinary', () => {
 //
 // The three fixtures under fixtures/server-parity/ are byte copies of the monorepo's
 // api/services/journal_two/note_connectors/convert/obsidian_fixtures_in/{18,25,26}-*
-// (branch feat/connector-fidelity-c-server, 9c50c686d3). Each `.vault.json` names the refs
-// the server turns into the intended images and chips. The cache entries below are what
-// Obsidian's metadataCache gives for each note (`original` exactly as written, `link` the
-// link path); `size` and `sha256` are the sidecar's own, fed in by path, since those
-// fixtures carry made-up hashes. Everything else (which entries become refs, `embed`,
-// the resolved `path`, the `#`-in-a-name and percent-decoded resolution, note links
-// skipped) is this plugin's.
+// (UCT-Dashboard branch fix/obsidian-fixture-26-real-shape, 6bd900ed87, which re-pinned
+// 26 to real Obsidian 1.13.7; 18 and 25 are unchanged since feat/connector-fidelity-c-server
+// 9c50c686d3). Each `.vault.json` names the refs the server turns into the intended images
+// and chips. The cache entries below are what Obsidian's metadataCache gives for each note
+// (`original` exactly as written, `link` the link path, `position` its offsets in the
+// body); `size` and `sha256` are the sidecar's own, fed in by path, since those fixtures
+// carry made-up hashes. Everything else (which entries become refs, `embed`, the resolved
+// `path`, the `#`-in-a-name and percent-decoded resolution, note links skipped, and the
+// link-with-embed-label refs read from the body) is this plugin's.
+//
+// Fixture 26 (issue #2): Obsidian 1.13.7 caches ONLY the embeds for
+// `[[q.pdf|![[img.png]]]]` and no link entry at all. Its cache below is embeds only; the
+// q.pdf, r.pdf and s.pdf refs come from listRawRefs reading the note body.
 //
 // Fixture 25's sidecar also carries a ref for `![[chart.png]]`, which sits inside an
 // inline code span. Obsidian's cache never reports a link in code, so production never
@@ -354,44 +501,40 @@ describe('ObsidianVaultSource.readBinary', () => {
 interface Sidecar { vault_paths: string[]; self_path: string; attachments: NoteAttachmentRef[] }
 
 const FIXTURE_DIR = path.resolve(__dirname, 'fixtures/server-parity');
-const PARITY: Record<string, FakeCache> = {
-	'18-attachment-names': {
+/** Per fixture: its cache, built over the fixture body so every entry has its position. */
+const PARITY: Record<string, (body: string) => FakeCache> = {
+	'18-attachment-names': (b) => ({
 		embeds: [
-			{ original: '![[my chart #1 (v2).png]]', link: 'my chart #1 (v2).png' },
-			{ original: '![](attachments/Ünïcode.png)', link: 'attachments/Ünïcode.png' },
+			at(b, '![[my chart #1 (v2).png]]', 'my chart #1 (v2).png'),
+			at(b, '![](attachments/Ünïcode.png)', 'attachments/Ünïcode.png'),
 		],
-		links: [{ original: '[the report](attachments/q3%20report.pdf)', link: 'attachments/q3%20report.pdf' }],
-	},
-	'25-code-span-link-text': {
+		links: [at(b, '[the report](attachments/q3%20report.pdf)', 'attachments/q3%20report.pdf')],
+	}),
+	'25-code-span-link-text': (b) => ({
 		links: [
-			{ original: '[`q3` deck](attachments/q.pdf)', link: 'attachments/q.pdf' },
-			{ original: '[[q.pdf|the `q3` deck]]', link: 'q.pdf' },
-			{ original: '[[Plan|the `x` plan]]', link: 'Plan' },
-			{ original: '[[Plan|the `x`]]', link: 'Plan' },
+			at(b, '[`q3` deck](attachments/q.pdf)', 'attachments/q.pdf'),
+			at(b, '[[q.pdf|the `q3` deck]]', 'q.pdf'),
+			at(b, '[[Plan|the `x` plan]]', 'Plan'),
+			at(b, '[[Plan|the `x`]]', 'Plan'),
 		],
-	},
-	'26-embed-as-file-alias': {
+	}),
+	'26-embed-as-file-alias': (b) => ({
 		embeds: [
-			{ original: '![[img.png]]', link: 'img.png' },
-			{ original: '![[img2.png]]', link: 'img2.png' },
-			{ original: '![[img3.png]]', link: 'img3.png' },
+			at(b, '![[img.png]]', 'img.png'),
+			at(b, '![[img2.png]]', 'img2.png'),
+			at(b, '![[img3.png]]', 'img3.png'),
 		],
-		links: [
-			{ original: '[[q.pdf|![[img.png]]]]', link: 'q.pdf' },
-			{ original: '[[r.pdf|![[img2.png]]', link: 'r.pdf' },
-			{ original: '[[s.pdf|![[img3.png]]', link: 's.pdf' },
-		],
-	},
+	}),
 };
 
 const NOT_FROM_OBSIDIAN: Record<string, string[]> = { '25-code-span-link-text': ['![[chart.png]]'] };
 
 describe('server parity fixtures', () => {
-	for (const [name, cache] of Object.entries(PARITY)) {
+	for (const [name, cacheOf] of Object.entries(PARITY)) {
 		it(`builds the refs fixture ${name} pins`, () => {
 			const sidecar = JSON.parse(readFileSync(path.join(FIXTURE_DIR, `${name}.vault.json`), 'utf8')) as Sidecar;
 			const body = readFileSync(path.join(FIXTURE_DIR, `${name}.md`), 'utf8');
-			for (const e of [...(cache.embeds ?? []), ...(cache.links ?? [])]) expect(body).toContain(e.original);
+			const cache = cacheOf(body); // `at` throws for an original the body does not hold
 
 			const byPath = new Map(sidecar.attachments.map((r) => [r.path, r]));
 			const files = sidecar.vault_paths.map((p) => tfile(p, byPath.get(p)?.size ?? 0));
@@ -399,7 +542,7 @@ describe('server parity fixtures', () => {
 			const vs = new ObsidianVaultSource(app);
 
 			const refs: NoteAttachmentRef[] = [];
-			for (const r of vs.listRawRefs(sidecar.self_path)) {
+			for (const r of vs.listRawRefs(sidecar.self_path, body)) {
 				const c = classifyRef(r, vs.resolveRef(r, sidecar.self_path));
 				if (c.kind === 'missing') refs.push(c.ref);
 				if (c.kind === 'file') {

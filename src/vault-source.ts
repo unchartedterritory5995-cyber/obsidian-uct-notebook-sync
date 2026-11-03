@@ -8,7 +8,7 @@
  * same-folder-first and the attachment folder setting are never reimplemented here.
  */
 import { parseLinktext, TFile } from 'obsidian';
-import type { App, CachedMetadata } from 'obsidian';
+import type { App, CachedMetadata, EmbedCache } from 'obsidian';
 import type { VaultFileRef, VaultSource } from './sync-manager';
 import { markdownTarget, type RawLinkRef, type ResolvedFile } from './attachment-refs';
 
@@ -30,6 +30,40 @@ function namesExactly(dest: TFile, text: string): boolean {
 	const want = fold(text);
 	const path = fold(dest.path);
 	return path === want || path.endsWith('/' + want) || fold(dest.name) === want;
+}
+
+/** `[[target|` closing the text just before an embed: a target with no `[`, `]` or `|`
+ * (so nothing runs across another `[[`). It is matched against the embed's own LINE
+ * only, so a target never runs across a line break or a blank line. */
+const ALIAS_HEAD_RE = /\[\[([^[\]|]+)\|$/;
+
+/**
+ * The link whose WHOLE alias is this embed, `[[q.pdf|![[img.png]]]]`, read from the
+ * note body at the embed's own cached position (issue #2). Obsidian 1.13.7 caches only
+ * the embed for that text and no link entry at all, so the file the link names would
+ * otherwise never be sent. Anchoring on a cached embed keeps code spans and fences out
+ * for free: Obsidian never caches an embed in code.
+ *
+ * Only an alias that is EXACTLY the embed counts: `[[q.pdf| x ![[img.png]]]]` is not
+ * read (the issue's shape, nothing wider). `![[q.pdf|![[img.png]]]]`, an embed whose
+ * alias is an embed, is not a link and is left alone. Returns the offset of the `[[`
+ * with the ref, or null.
+ */
+function embedAliasLink(body: string, e: EmbedCache): { start: number; ref: RawLinkRef } | null {
+	const start = e.position?.start?.offset;
+	const end = e.position?.end?.offset;
+	if (typeof start !== 'number' || typeof end !== 'number') return null;
+	// A cache older than the body: its offsets no longer point at this embed.
+	if (body.slice(start, end) !== e.original) return null;
+	if (body.slice(end, end + 2) !== ']]') return null;
+	const lineStart = body.lastIndexOf('\n', start - 1) + 1;
+	const m = ALIAS_HEAD_RE.exec(body.slice(lineStart, start));
+	if (m === null) return null;
+	const target = m[1] ?? '';
+	if (!target.trim()) return null;
+	const linkStart = start - m[0].length;
+	if (body[linkStart - 1] === '!') return null;
+	return { start: linkStart, ref: { original: body.slice(linkStart, end + 2), linkpath: target, embed: false } };
 }
 
 export class ObsidianVaultSource implements VaultSource {
@@ -96,7 +130,9 @@ export class ObsidianVaultSource implements VaultSource {
 		return file instanceof TFile && this.app.metadataCache.getFileCache(file) !== null;
 	}
 
-	listRawRefs(notePath: string): RawLinkRef[] {
+	/** With the note `body`, also the link whose whole alias is an embed (issue #2),
+	 * which Obsidian's cache does not report; without it, the cache's refs only. */
+	listRawRefs(notePath: string, body?: string): RawLinkRef[] {
 		const file = this.app.vault.getAbstractFileByPath(notePath);
 		if (!(file instanceof TFile)) return [];
 		const meta: CachedMetadata | null = this.app.metadataCache.getFileCache(file);
@@ -110,6 +146,18 @@ export class ObsidianVaultSource implements VaultSource {
 		};
 		for (const e of meta.embeds ?? []) add(e.original, e.link, true);
 		for (const l of meta.links ?? []) add(l.original, l.link, false);
+		if (body === undefined) return out;
+		// A future Obsidian that caches the link itself is not sent it twice.
+		const linkStarts = new Set<number>();
+		for (const l of meta.links ?? []) {
+			const at = l.position?.start?.offset;
+			if (typeof at === 'number') linkStarts.add(at);
+		}
+		for (const e of meta.embeds ?? []) {
+			const hit = embedAliasLink(body, e);
+			if (hit === null || linkStarts.has(hit.start)) continue;
+			add(hit.ref.original, hit.ref.linkpath, false);
+		}
 		return out;
 	}
 
