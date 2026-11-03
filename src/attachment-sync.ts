@@ -70,6 +70,14 @@ function codePoints(s: string): number {
 	return Array.from(s).length;
 }
 
+/** Long loops give the UI thread a turn this often (iterations), so a big vault never
+ * freezes Obsidian (final review I1, M5). A macrotask, not a microtask: only a
+ * macrotask lets rendering and input run. */
+export const YIELD_EVERY = 500;
+function yieldToUi(): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 export async function prepareAttachments(deps: PrepareDeps, notePaths: string[]): Promise<PrepareResult> {
 	const { transport, vaultSource, data, serverUrl, token } = deps;
 	const legacy = (): PrepareResult => ({
@@ -125,8 +133,13 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 	const hashes: PluginData['attachmentHashes'] = {};
 	/** sha256 -> the first file that has it (the one uploaded). */
 	const firstFile = new Map<string, { path: string; size: number; extension: string }>();
+	let steps = 0;
+	const step = async (): Promise<void> => {
+		if (++steps % YIELD_EVERY === 0) await yieldToUi();
+	};
 
 	for (const notePath of notePaths) {
+		await step();
 		// ⛔ A note Obsidian has not indexed yet sends NO list (null), never `[]`: `[]`
 		// would tell the server "this note uses no files", and its hash would match a
 		// later indexed run with no refs. Its re-push with refs replaces it.
@@ -137,6 +150,7 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 		const refs: NoteAttachmentRef[] = [];
 		let overflow = false;
 		for (const raw of vaultSource.listRawRefs(notePath)) {
+			await step();
 			const c = classifyRef(raw, vaultSource.resolveRef(raw, notePath));
 			if (c.kind === 'skip') continue;
 			// ⛔ A ref the server model would refuse (`original` over 2048, `path` over
@@ -212,10 +226,21 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 		return result;
 	};
 	if (offline) return settle(probeBusy);
-	const allRefs = (): NoteAttachmentRef[] => [...refsByNote.values()].flatMap((r) => r ?? []);
+	// sha -> its `ok` refs, built once: marking a blob storage-limit touches only that
+	// blob's refs. ⚰️ It flattened every ref of every note on each call, so a 413 on a
+	// 5k-blob, 30k-ref vault blocked the UI for ~3 s (final review I1).
+	const refsBySha = new Map<string, NoteAttachmentRef[]>();
+	for (const refs of refsByNote.values()) {
+		for (const r of refs ?? []) {
+			if (r.status !== 'ok' || r.sha256 === null) continue;
+			const list = refsBySha.get(r.sha256);
+			if (list) list.push(r);
+			else refsBySha.set(r.sha256, [r]);
+		}
+	}
 	const markStorageLimit = (sha: string): void => {
-		for (const r of allRefs()) {
-			if (r.sha256 === sha && r.status === 'ok') {
+		for (const r of refsBySha.get(sha) ?? []) {
+			if (r.status === 'ok') {
 				r.status = 'storage-limit';
 				addIssue({ path: r.path, reason: 'storage-limit', size: r.size });
 			}
@@ -249,6 +274,7 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 	let sentBytes = 0;
 	let busy = false;
 	for (let i = 0; i < missing.length; i++) {
+		await step();
 		if (clock() - started >= budget.ms || sentBytes >= budget.bytes) break; // later runs go on
 		const sha = missing[i]!;
 		const f = firstFile.get(sha);
@@ -289,7 +315,10 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 			break;
 		}
 		if (up.storageFull) {
-			for (const rest of missing.slice(i)) markStorageLimit(rest);
+			for (let j = i; j < missing.length; j++) {
+				await step();
+				markStorageLimit(missing[j]!);
+			}
 			break;
 		}
 		if (up.status === 403) {

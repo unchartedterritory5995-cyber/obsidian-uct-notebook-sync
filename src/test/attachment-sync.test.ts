@@ -18,6 +18,67 @@ const A = bytes('png A');
 const B = bytes('png B');
 const C = bytes('png C');
 
+/** The longest stretch the event loop was blocked while `work` ran: a setTimeout(0)
+ * ticker can only run between slices, so the largest gap between ticks is the
+ * longest slice. */
+async function longestSliceMs(work: () => Promise<unknown>): Promise<number> {
+	let last = performance.now();
+	let max = 0;
+	let done = false;
+	const tick = (): void => {
+		const now = performance.now();
+		max = Math.max(max, now - last);
+		last = now;
+		if (!done) setTimeout(tick, 0);
+	};
+	setTimeout(tick, 0);
+	await work();
+	done = true;
+	return Math.max(max, performance.now() - last);
+}
+
+/** A big vault: 5000 blobs, 3000 notes x 10 refs = 30k refs, resolved through a map
+ * (the plain FakeVault resolves by scanning, which would time the fake, not the code). */
+function bigVault(): FakeVault {
+	const vault = new FakeVault();
+	const byName = new Map<string, string>();
+	for (let i = 0; i < 5000; i++) {
+		vault.file(`att/f${i}.png`, bytes(`blob ${i}`));
+		byName.set(`f${i}.png`, `att/f${i}.png`);
+	}
+	for (let j = 0; j < 3000; j++) {
+		const refs = [];
+		for (let k = 0; k < 10; k++) refs.push(embed(`f${(j * 10 + k) % 5000}.png`));
+		vault.note(`n${j}.md`, 'x', refs);
+	}
+	vault.resolveRef = (raw) => {
+		const path = byName.get(raw.linkpath);
+		if (!path) return null;
+		return { path, extension: 'png', size: vault.files[path]!.data.byteLength, mtime: 1 };
+	};
+	return vault;
+}
+
+describe('prepareAttachments on a big vault (final review I1)', () => {
+	it('marking storage-limit over 30k refs / 5k blobs never blocks the UI for 100 ms', async () => {
+		const vault = bigVault();
+		// every blob over the member's room
+		const full = new FakeServer();
+		full.remainingBytes = 0;
+		const d1 = data();
+		const slice1 = await longestSliceMs(() => run(full, vault, d1));
+		expect(full.uploadCalls).toEqual([]);
+		// a 413 storage-full on the first upload marks the other 4999
+		const s413 = new FakeServer();
+		s413.uploadScript = [uploadFailure(413, 'Your UCT storage for imported files is full.', { storageFull: true })];
+		let r: Awaited<ReturnType<typeof run>> | undefined;
+		const slice2 = await longestSliceMs(async () => { r = await run(s413, vault, data()); });
+		expect([...r!.refsByNote.values()].flatMap((x) => x ?? []).every((x) => x.status === 'storage-limit')).toBe(true);
+		expect(slice1).toBeLessThan(100);
+		expect(slice2).toBeLessThan(100);
+	}, 60_000);
+});
+
 describe('prepareAttachments', () => {
 	it('a server without attachment support maps every note to null (legacy) and never waits or reads', async () => {
 		const server = new FakeServer();
