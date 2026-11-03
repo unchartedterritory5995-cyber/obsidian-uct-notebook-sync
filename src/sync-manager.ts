@@ -52,6 +52,7 @@ export const SERVER_CHANGED_MESSAGE = 'Server address changed — reconnect to s
 export const STOPPED_MESSAGE = 'Sync stopped: the plugin was turned off or Obsidian closed.';
 import { noteContentHash } from './attachment-refs';
 import { prepareAttachments } from './attachment-sync';
+import { validateServerUrl } from './server-url';
 import { applySyncResult, finalizeManifest, planSync } from './sync-plan';
 import type { NoteInput, PluginData, ScannedFile } from './types';
 import type { Transport } from './api-client';
@@ -159,6 +160,14 @@ export class SyncManager {
 		// reasoning) survives the `await`s below — `data.deviceToken` itself
 		// stays `string | null` since `fail()` may null it out mid-run.
 		const deviceToken: string = data.deviceToken;
+
+		// A token not yet bound (one that reached this run without passing through the
+		// load-time migration) is bound here, to the Server URL it is about to be sent
+		// to, but only when that is already a valid, normalized origin (review N2).
+		if (data.tokenOrigin === null) {
+			const current = validateServerUrl(data.serverUrl);
+			if (current.ok && current.url === data.serverUrl) data.tokenOrigin = current.url;
+		}
 
 		// ⛔ The token goes only to the origin it was redeemed against. A Server URL edited
 		// to a typo or to an address someone else supplied would otherwise receive the

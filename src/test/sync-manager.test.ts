@@ -405,6 +405,35 @@ describe('SyncManager.abort (final review M3)', () => {
 	});
 });
 
+describe('SyncManager token origin binding at first sync (N2)', () => {
+	it('an unbound token is bound to the (valid, normalized) Server URL on its first sync, then guarded', async () => {
+		const t = new FakeServer();
+		const data = makeData({ serverUrl: 'https://uctintelligence.com', tokenOrigin: null });
+		const m = new SyncManager({
+			transport: t, vaultSource: new FakeVault().note('a.md', '# a', []),
+			getData: () => data, saveData: async () => {},
+		});
+		expect((await m.runSync()).ok).toBe(true);
+		expect(data.tokenOrigin).toBe('https://uctintelligence.com');
+
+		data.serverUrl = 'https://uctinteligence.com';
+		t.reset();
+		const s = await m.runSync();
+		expect(s.error).toBe('Server address changed — reconnect to sync');
+		expect(t.checkCalls).toEqual([]);
+	});
+
+	it('never binds to a Server URL that is not a valid normalized origin', async () => {
+		const data = makeData({ serverUrl: 'ftp://uctintelligence.com', tokenOrigin: null });
+		const m = new SyncManager({
+			transport: new FakeServer(), vaultSource: new FakeVault(),
+			getData: () => data, saveData: async () => {},
+		});
+		await m.runSync();
+		expect(data.tokenOrigin).toBeNull();
+	});
+});
+
 describe('SyncManager token origin (final review I6)', () => {
 	it('never sends the token to an origin other than the one it was redeemed against', async () => {
 		const t = new FakeServer();
