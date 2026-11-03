@@ -48,8 +48,9 @@ const ALIAS_HEAD_RE = /\[\[([^[\]|<\r]+)\|$/;
 
 /** An embed the server splits back out of a whole-link original, a `![[...]]` its
  * `_WIKI_EMBED` reads, with the same subset rule as ALIAS_HEAD_RE. A markdown image
- * (`![](img.png)`) is NOT split by the server: sent as a whole link, the image would be
- * lost (fix round 1, I1). */
+ * (`![](img.png)`) is NOT read here: a server before the issue #3 fix does not split it,
+ * so a whole link sent from it would lose the image (fix round 1, I1). Real Obsidian
+ * caches that shape as a LINK, which `markdownImageAlias` reads instead. */
 const WIKI_EMBED_RE = /^!\[\[[^[\]|<\r\n]+(?:\|[^[\]<\r\n]+)?\]\]$/;
 
 /**
@@ -80,6 +81,27 @@ function embedAliasLink(body: string, e: EmbedCache): { start: number; ref: RawL
 	const linkStart = start - m[0].length;
 	if (body[linkStart - 1] === '!') return null;
 	return { start: linkStart, ref: { original: body.slice(linkStart, end + 2), linkpath: target, embed: false } };
+}
+
+/** A cached LINK whose whole alias is ONE markdown image, `[[q.pdf|![alt](att/img.png)]]`
+ * (issue #3). The server splits exactly that shape back into the image and the chip
+ * (`_alias_md_image` in providers/obsidian.py, its `_MD_LINK_OR_IMAGE_RE` image); every
+ * class here is a SUBSET of it, the target as in ALIAS_HEAD_RE: an alt with no brackets,
+ * a plain destination (no `<...>` form, no title, no spaces around it). A doubt adds
+ * nothing, which is 0.2.0's behaviour: the server still shows the image as written. */
+const MD_IMAGE_ALIAS_LINK_RE = /^\[\[([^[\]|<\r\n]+)\|(!\[[^[\]\r\n]*\]\(([^\s()<>]+)\))\]\]$/;
+
+/**
+ * The embed ref for the image a link's whole alias is, `{original: '![alt](dest)',
+ * linkpath: dest, embed: true}`, or null. Real Obsidian 1.15.0 caches
+ * `[[q.pdf|![](att/img.png)]]` as one link and NO embed, so without this the image is
+ * never uploaded. The ref resolves like any markdown embed (`resolveRef`/`markdownTarget`).
+ * The markdown twin of `embedAliasLink`; it needs no body, the link's own original is it.
+ */
+function markdownImageAlias(original: string): RawLinkRef | null {
+	const m = MD_IMAGE_ALIAS_LINK_RE.exec(original);
+	if (m === null || !(m[1] ?? '').trim()) return null;
+	return { original: m[2] ?? '', linkpath: m[3] ?? '', embed: true };
 }
 
 export class ObsidianVaultSource implements VaultSource {
@@ -162,6 +184,12 @@ export class ObsidianVaultSource implements VaultSource {
 		};
 		for (const e of meta.embeds ?? []) add(e.original, e.link, true);
 		for (const l of meta.links ?? []) add(l.original, l.link, false);
+		// A link whose whole alias is a markdown image (issue #3): its image, unless the
+		// cache already holds that embed (`add` skips a seen original).
+		for (const l of meta.links ?? []) {
+			const image = markdownImageAlias(l.original);
+			if (image !== null) add(image.original, image.linkpath, true);
+		}
 		if (body === undefined) return out;
 		// A future Obsidian that caches the link itself is not sent it twice.
 		const linkStarts = new Set<number>();

@@ -290,6 +290,74 @@ describe('ObsidianVaultSource.listRawRefs: a link whose label is an embed (issue
 	});
 });
 
+describe('ObsidianVaultSource.listRawRefs: a link whose label is a markdown image (issue #3)', () => {
+	// Real Obsidian 1.15.0 caches `[[q.pdf|![](att/img.png)]]` as ONE link (that whole
+	// original, link `q.pdf`) and NO embed. listRawRefs adds the image's own embed ref, so
+	// the image is uploaded and the server shows it before the chip.
+	const refsFor = (body: string | undefined, cache: FakeCache, files: TFile[] = []) => {
+		const { app } = fakeApp({ files: [tfile(SRC), ...files], caches: { [SRC]: cache } });
+		return new ObsidianVaultSource(app).listRawRefs(SRC, body);
+	};
+	const link = (body: string, original: string, target: string) => at(body, original, target);
+
+	it('adds the image as an embed ref beside the whole link, with or without the body', () => {
+		const body = 'x [[q.pdf|![](att/img.png)]] y\n';
+		const cache = { links: [link(body, '[[q.pdf|![](att/img.png)]]', 'q.pdf')] };
+		const want = [
+			{ original: '[[q.pdf|![](att/img.png)]]', linkpath: 'q.pdf', embed: false },
+			{ original: '![](att/img.png)', linkpath: 'att/img.png', embed: true },
+		];
+		expect(refsFor(body, cache)).toEqual(want);
+		expect(refsFor(undefined, cache)).toEqual(want);
+		// alt text is kept as written; the destination is the link path
+		const alt = 'x [[q.pdf|![a chart](img%20a.png)]] y\n';
+		expect(refsFor(alt, { links: [link(alt, '[[q.pdf|![a chart](img%20a.png)]]', 'q.pdf')] })[1]).toEqual(
+			{ original: '![a chart](img%20a.png)', linkpath: 'img%20a.png', embed: true });
+	});
+
+	it('the added ref resolves and classifies like any markdown embed', () => {
+		const body = 'x [[q.pdf|![](att/my%20img.png)]] y\n';
+		const files = [tfile(SRC), tfile('att/q.pdf', 40), tfile('att/my img.png', 10)];
+		const { app } = fakeApp({ files, caches: { [SRC]: { links: [link(body, '[[q.pdf|![](att/my%20img.png)]]', 'q.pdf')] } } });
+		const vs = new ObsidianVaultSource(app);
+		const classes = vs.listRawRefs(SRC, body).map((r) => classifyRef(r, vs.resolveRef(r, SRC)));
+		expect(classes.map((c) => (c.kind === 'file' ? [c.raw.embed, c.file.path] : c.kind))).toEqual([
+			[false, 'att/q.pdf'], [true, 'att/my img.png']]);
+	});
+
+	it('is not sent twice when the cache already has that embed', () => {
+		const body = 'x [[q.pdf|![](img.png)]] y\n';
+		expect(refsFor(body, {
+			embeds: [at(body, '![](img.png)', 'img.png')],
+			links: [link(body, '[[q.pdf|![](img.png)]]', 'q.pdf')],
+		})).toEqual([
+			{ original: '![](img.png)', linkpath: 'img.png', embed: true },
+			{ original: '[[q.pdf|![](img.png)]]', linkpath: 'q.pdf', embed: false },
+		]);
+	});
+
+	it('only an alias that is EXACTLY one plain markdown image counts: stricter than the server, never looser', () => {
+		for (const original of [
+			'[[q.pdf|see ![](img.png)]]', // text beside the image: the server does not split it
+			'[[q.pdf|![](img.png) ]]',
+			'[[q.pdf|[see](img.png)]]', // a link, not an image
+			'[[q.pdf|![](<img.png>)]]', // the server splits these four; the plugin is stricter
+			'[[q.pdf|![](<my img.png>)]]',
+			'[[q.pdf|![](img.png "t")]]',
+			'[[q.pdf|![a [b]](img.png)]]',
+			'[[q<.pdf|![](img.png)]]',
+			'[[ |![](img.png)]]',
+			'[[q.pdf|![](img.png)]] x',
+			'[[q.pdf|![](img.png)](x.png)]]',
+		]) {
+			const body = `x ${original} y\n`;
+			expect(refsFor(body, { links: [link(body, original, 'q.pdf')] }), original).toEqual([
+				{ original, linkpath: 'q.pdf', embed: false },
+			]);
+		}
+	});
+});
+
 describe('ObsidianVaultSource.resolveLink', () => {
 	it('resolveLink delegates to getFirstLinkpathDest with the source path and strips #subpath', () => {
 		const png = tfile('att/chart.png', 7, 5);
@@ -525,11 +593,11 @@ describe('ObsidianVaultSource.readBinary', () => {
 
 // ── Server parity: the refs this plugin builds are the refs the server's fixtures pin ──
 //
-// The three fixtures under fixtures/server-parity/ are byte copies of the monorepo's
-// api/services/journal_two/note_connectors/convert/obsidian_fixtures_in/{18,25,26}-*
+// The four fixtures under fixtures/server-parity/ are byte copies of the monorepo's
+// api/services/journal_two/note_connectors/convert/obsidian_fixtures_in/{18,25,26,34}-*
 // (UCT-Dashboard branch fix/obsidian-fixture-26-real-shape, 6bd900ed87, which re-pinned
 // 26 to real Obsidian 1.13.7; 18 and 25 are unchanged since feat/connector-fidelity-c-server
-// 9c50c686d3). Each `.vault.json` names the refs the server turns into the intended images
+// 9c50c686d3; 34 from branch fix/obsidian-md-image-alias, 8fe43568da). Each `.vault.json` names the refs the server turns into the intended images
 // and chips. The cache entries below are what Obsidian's metadataCache gives for each note
 // (`original` exactly as written, `link` the link path, `position` its offsets in the
 // body); `size` and `sha256` are the sidecar's own, fed in by path, since those fixtures
@@ -540,6 +608,12 @@ describe('ObsidianVaultSource.readBinary', () => {
 // Fixture 26 (issue #2): Obsidian 1.13.7 caches ONLY the embeds for
 // `[[q.pdf|![[img.png]]]]` and no link entry at all. Its cache below is embeds only; the
 // q.pdf, r.pdf and s.pdf refs come from listRawRefs reading the note body.
+//
+// Fixture 34 (issue #3): Obsidian 1.15.0 caches `[[q.pdf|![](att/img.png)]]` as ONE link
+// and no embed. Its cache below is those links only; the image refs come from listRawRefs
+// reading each link's alias. Its r.pdf line pins what 0.2.0 sent (the whole link
+// only, so the server shows the image as written): this plugin also sends that line's
+// image, which FROM_THIS_PLUGIN_ONLY names.
 //
 // Fixture 25's sidecar also carries a ref for `![[chart.png]]`, which sits inside an
 // inline code span. Obsidian's cache never reports a link in code, so production never
@@ -574,9 +648,18 @@ const PARITY: Record<string, (body: string) => FakeCache> = {
 			at(b, '![[img3.png]]', 'img3.png'),
 		],
 	}),
+	'34-markdown-image-as-file-alias': (b) => ({
+		links: [
+			at(b, '[[q.pdf|![](att/img.png)]]', 'q.pdf'),
+			at(b, '[[r.pdf|![](att/img2.png)]]', 'r.pdf'),
+		],
+	}),
 };
 
 const NOT_FROM_OBSIDIAN: Record<string, string[]> = { '25-code-span-link-text': ['![[chart.png]]'] };
+/** Refs this plugin sends that the sidecar leaves out on purpose: that line pins an older
+ * plugin's refs (fixture 34's r.pdf line, issue #3). */
+const FROM_THIS_PLUGIN_ONLY: Record<string, string[]> = { '34-markdown-image-as-file-alias': ['![](att/img2.png)'] };
 
 describe('server parity fixtures', () => {
 	for (const [name, cacheOf] of Object.entries(PARITY)) {
@@ -605,7 +688,13 @@ describe('server parity fixtures', () => {
 			const skip = NOT_FROM_OBSIDIAN[name] ?? [];
 			for (const o of skip) expect(sidecar.attachments.map((r) => r.original)).toContain(o);
 			const expected = sidecar.attachments.filter((r) => !skip.includes(r.original));
-			expect([...refs].sort(byOriginal)).toEqual(expected.sort(byOriginal));
+			const extra = FROM_THIS_PLUGIN_ONLY[name] ?? [];
+			for (const o of extra) {
+				expect(sidecar.attachments.map((r) => r.original)).not.toContain(o);
+				expect(refs.map((r) => r.original)).toContain(o);
+			}
+			const sent = refs.filter((r) => !extra.includes(r.original));
+			expect([...sent].sort(byOriginal)).toEqual(expected.sort(byOriginal));
 		});
 	}
 });
