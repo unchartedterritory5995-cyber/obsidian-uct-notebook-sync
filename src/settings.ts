@@ -83,13 +83,14 @@ export function visibleIssues(
 export async function commitServerUrl(
 	plugin: { data: { serverUrl: string }; saveData(data: unknown): Promise<void> },
 	value: string,
-): Promise<ServerUrlResult> {
+): Promise<ServerUrlResult & { saved: boolean }> {
 	const result = validateServerUrl(value);
 	if (result.ok && result.url !== plugin.data.serverUrl) {
 		plugin.data.serverUrl = result.url;
 		await plugin.saveData(plugin.data);
+		return { ...result, saved: true };
 	}
-	return result;
+	return { ...result, saved: false };
 }
 
 export class UctNotebookSyncSettingTab extends PluginSettingTab {
@@ -142,7 +143,9 @@ export class UctNotebookSyncSettingTab extends PluginSettingTab {
 			const commit = async (): Promise<void> => {
 				const result = await commitServerUrl(this.plugin, text.getValue());
 				showUrlResult(result);
-				if (result.ok) this.display();
+				// only a value that was actually saved re-renders the tab (review N3): a
+				// blur with nothing changed must not rebuild the page under the member
+				if (result.saved) this.display();
 			};
 			text.inputEl.addEventListener('blur', () => { void commit(); });
 			text.inputEl.addEventListener('keydown', (e: KeyboardEvent) => {

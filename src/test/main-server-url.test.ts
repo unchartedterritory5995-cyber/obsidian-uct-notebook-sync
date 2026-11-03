@@ -172,6 +172,13 @@ describe('plugin wiring of the Server URL guard', () => {
 		expect((plugin as any).saveCalls.length).toBe(saves + 1);
 	});
 
+	it('commitServerUrl reports whether it saved, so Settings re-renders only then (N3)', async () => {
+		const { plugin } = await makePlugin('https://uctintelligence.com', null);
+		expect(await commitServerUrl(plugin, 'https://uctintelligence.com')).toMatchObject({ ok: true, saved: false });
+		expect(await commitServerUrl(plugin, 'ftp://x')).toMatchObject({ ok: false, saved: false });
+		expect(await commitServerUrl(plugin, 'https://other.example')).toMatchObject({ ok: true, saved: true });
+	});
+
 	it('a long sync shows a "syncing" notice; a quick one does not (final review M1)', async () => {
 		const { plugin, transport } = await makePlugin('https://uctintelligence.com');
 		(plugin as any).syncingNoticeDelayMs = 20;
