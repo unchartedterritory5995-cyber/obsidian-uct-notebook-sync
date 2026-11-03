@@ -255,5 +255,6 @@ if you sync your vault folder with another tool, that file travels with it.
 
 Consent is captured on the dashboard side, before a connect code can even be
 minted. Members who connected under 0.1.x (note text only) see a one-time
-notice at the start of the first sync that sends files, before anything is
-uploaded, and can turn file sync off in Settings.
+notice on the first sync that would send files, and that sync uploads
+nothing: uploads start on the next sync, unless file sync has been turned
+off in Settings by then.

@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { prepareAttachments } from '../attachment-sync';
+import { ATTACHMENTS_NOTICE, prepareAttachments } from '../attachment-sync';
 import { defaultPluginData, type PluginData } from '../types';
 import { bytes, embed, FakeServer, FakeVault, shaOf, uploadFailure } from './attachment-fakes';
 
+/** Consent already given unless a test says otherwise: the first-run "notice, no
+ * uploads" rule has its own test. */
 function data(over: Partial<PluginData> = {}): PluginData {
-	return { ...defaultPluginData('v1'), deviceToken: 't', ...over };
+	return { ...defaultPluginData('v1'), deviceToken: 't', attachmentsNoticeShown: true, ...over };
 }
 
 function run(server: FakeServer, vault: FakeVault, d: PluginData = data()) {
@@ -240,36 +242,49 @@ describe('prepareAttachments', () => {
 		expect((await refused()).issues).toEqual([]);
 	});
 
-	it('the one-time "now sends images and files" notice comes BEFORE the first upload (final review M7)', async () => {
+	it('consent: the first attachment run shows the notice and uploads NOTHING; uploads start next run', async () => {
 		const vault = new FakeVault().note('a.md', '![[a.png]]', [embed('a.png')]).file('att/a.png', A);
 		const log: string[] = [];
 		const server = new FakeServer();
 		server.onUpload = () => log.push('upload');
-		const d = data();
+		const d = data({ attachmentsNoticeShown: false });
 		const go = (s: FakeServer, dd: PluginData) => prepareAttachments(
 			{ transport: s, vaultSource: vault, data: dd, serverUrl: 'https://x.test', token: 't',
 				onProgress: (m) => log.push(`notice: ${m}`) },
 			['a.md'],
 		);
-		await go(server, d);
-		expect(log).toEqual([
-			'notice: UCT Notebook Sync now also sends the images and files your notes use. You can turn this off in its settings.',
-			'upload',
+		// run 1: the notice, refs sent as usual (the server shows "retrying"), 0 uploads
+		const r1 = await go(server, d);
+		expect(log).toEqual([`notice: ${ATTACHMENTS_NOTICE}`]);
+		expect(ATTACHMENTS_NOTICE).toBe(
+			'UCT Notebook Sync will now also sync the images and files your notes use — turn this off in Settings.');
+		expect(r1.refsByNote.get('a.md')).toEqual([
+			{ original: '![[a.png]]', embed: true, path: 'att/a.png', size: A.byteLength, sha256: shaOf(A), status: 'ok' },
 		]);
-		expect(d.attachmentsNoticeShown).toBe(true);
+		expect(server.uploadCalls).toEqual([]);
+		expect(d.attachmentsNoticeShown).toBe(true); // persisted with the plugin data
 
+		// run 2: uploads, no second notice
 		log.length = 0;
-		vault.file('att/a.png', B, 2); // a new blob to upload: still no second notice
 		await go(server, d);
 		expect(log).toEqual(['upload']);
 
-		// not on a text-only server, and not with the toggle off
+		// the member turned the toggle off after the notice: nothing is ever uploaded
+		const d3 = data({ attachmentsNoticeShown: false });
+		const s3 = new FakeServer();
+		await go(s3, d3);
+		d3.syncAttachments = false;
+		const r3 = await go(s3, d3);
+		expect(s3.uploadCalls).toEqual([]);
+		expect(r3.refsByNote.get('a.md')!.map((r) => [r.status, r.sha256])).toEqual([['off', null]]);
+
+		// no notice on a text-only server, and none with the toggle already off
 		const old = new FakeServer();
 		old.supported = false;
-		const d2 = data();
+		const d2 = data({ attachmentsNoticeShown: false });
 		log.length = 0;
 		await go(old, d2);
-		await go(new FakeServer(), data({ syncAttachments: false }));
+		await go(new FakeServer(), data({ attachmentsNoticeShown: false, syncAttachments: false }));
 		expect(log).toEqual([]);
 		expect(d2.attachmentsNoticeShown).toBe(false);
 	});

@@ -57,7 +57,7 @@ export const PROGRESS_NOTICE_AFTER = 100;
 export const PREPARING_MESSAGE = 'UCT Notebook Sync: preparing the images and files your notes use…';
 
 export const ATTACHMENTS_NOTICE =
-	'UCT Notebook Sync now also sends the images and files your notes use. You can turn this off in its settings.';
+	'UCT Notebook Sync will now also sync the images and files your notes use — turn this off in Settings.';
 
 export const UPLOAD_BUDGET_MS = 60_000;
 export const UPLOAD_BUDGET_BYTES = 100 * 1024 * 1024;
@@ -154,11 +154,16 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 		data.attachmentServer = { maxBytes, maxRefsPerNote: maxRefs };
 	}
 
-	// The member is told BEFORE anything is uploaded, on the first run that will send
-	// files (final review M7): members who connected under 0.1.x agreed to note text.
+	// Consent (ruled): members who connected under 0.1.x agreed to note text. The first
+	// run that would send files TELLS them and uploads nothing; its refs go out as usual
+	// (the server shows "retrying"). Uploads start on the next run, unless the member
+	// has turned "Sync images and files" off by then. The flag is saved with the plugin
+	// data, so this happens once.
+	let consentRun = false;
 	if (!offline && syncOn && !data.attachmentsNoticeShown) {
 		deps.onProgress?.(ATTACHMENTS_NOTICE);
 		data.attachmentsNoticeShown = true;
+		consentRun = true;
 	}
 
 	// 2. Obsidian's link index.
@@ -294,6 +299,7 @@ export async function prepareAttachments(deps: PrepareDeps, notePaths: string[])
 		return result;
 	};
 	if (offline) return settle(probeBusy, !probeBusy);
+	if (consentRun) return settle(false); // nothing is checked or uploaded on the consent run
 	// sha -> its `ok` refs, built once: marking a blob storage-limit touches only that
 	// blob's refs. ⚰️ It flattened every ref of every note on each call, so a 413 on a
 	// 5k-blob, 30k-ref vault blocked the UI for ~3 s (final review I1).

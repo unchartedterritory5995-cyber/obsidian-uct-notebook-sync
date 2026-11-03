@@ -108,8 +108,11 @@ function okIngest(overrides: Partial<IngestOutcome & { ok: true }> = {}): Ingest
 	};
 }
 
+/** Consent already given (the first-run "notice, no uploads" rule has its own tests). */
 function makeData(overrides: Partial<PluginData> = {}): PluginData {
-	return { ...defaultPluginData('vault-uuid-1'), deviceToken: 'device-token-1', ...overrides };
+	return {
+		...defaultPluginData('vault-uuid-1'), deviceToken: 'device-token-1', attachmentsNoticeShown: true, ...overrides,
+	};
 }
 
 describe('SyncManager.runSync', () => {
@@ -834,6 +837,35 @@ describe('SyncManager.runSync with attachments', () => {
 		const pushed3 = t.pushedNotes();
 		expect(pushed3.map((n) => n.vault_path)).toEqual(['a.md']); // b was cut and is held
 		expect(store.attachmentIssues.filter((i) => i.reason === 'waiting-for-index')).toEqual([]);
+	});
+
+	it('consent: the first attachment run pushes the notes with their refs and uploads nothing; run 2 uploads', async () => {
+		const t = new FakeServer();
+		const vault = new FakeVault().note('a.md', '![[chart.png]]', [embed('chart.png')]).file('att/chart.png', B);
+		const notices: string[] = [];
+		store = makeData({ attachmentsNoticeShown: false });
+		const m = new SyncManager({
+			transport: t, vaultSource: vault, getData: () => store,
+			saveData: async (d) => { store = JSON.parse(JSON.stringify(d)) as PluginData; },
+			onProgress: (msg) => notices.push(msg),
+		});
+		const s1 = await m.runSync();
+		expect(s1.ok).toBe(true);
+		expect(notices).toHaveLength(1);
+		expect(t.uploadCalls).toEqual([]);
+		expect(t.pushedNotes()[0]!.attachments![0]).toMatchObject({ status: 'ok', sha256: shaOf(B) });
+		expect(store.attachmentsNoticeShown).toBe(true); // survives a restart
+
+		t.reset();
+		const restarted = new SyncManager({
+			transport: t, vaultSource: vault, getData: () => store,
+			saveData: async (d) => { store = JSON.parse(JSON.stringify(d)) as PluginData; },
+			onProgress: (msg) => notices.push(msg),
+		});
+		const s2 = await restarted.runSync();
+		expect(t.uploadCalls).toHaveLength(1);
+		expect(s2.attachmentsSent).toBe(1);
+		expect(notices).toHaveLength(1);
 	});
 
 	it('settings edited during a run do not change that run (final review M4)', async () => {
