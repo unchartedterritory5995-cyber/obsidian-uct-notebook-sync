@@ -361,6 +361,23 @@ describe('prepareAttachments', () => {
 		expect(r.refsByNote.get('plain.md')).toEqual([]);
 	});
 
+	it('hands each indexed note its body for the link-with-embed-label refs (issue #2)', async () => {
+		const server = new FakeServer();
+		const vault = new FakeVault()
+			.note('a.md', 'x [[q.pdf|![[a.png]]]] y', [embed('a.png')])
+			.note('late.md', '![[a.png]]', null)
+			.file('att/a.png', A);
+		await run(server, vault);
+		// the unindexed note is never asked for refs
+		expect(vault.rawRefBodies).toEqual([['a.md', 'x [[q.pdf|![[a.png]]]] y']]);
+		// a note that cannot be read still gets the cache's refs
+		const broken = new FakeVault().note('b.md', 'x', [embed('a.png')]).file('att/a.png', A);
+		broken.readFile = async () => { throw new Error('locked'); };
+		const r = await run(new FakeServer(), broken);
+		expect(broken.rawRefBodies).toEqual([['b.md', undefined]]);
+		expect(r.refsByNote.get('b.md')?.map((x) => x.path)).toEqual(['att/a.png']);
+	});
+
 	it('uploads each missing hash once, for the first path that has it', async () => {
 		const server = new FakeServer();
 		const vault = new FakeVault()

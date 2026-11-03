@@ -59,7 +59,11 @@ export class FakeVault implements VaultSource {
 		return this.refs[notePath] !== null;
 	}
 
-	listRawRefs(notePath: string): RawLinkRef[] {
+	/** The `body` each listRawRefs call was given, by note, in call order. */
+	rawRefBodies: [string, string | undefined][] = [];
+
+	listRawRefs(notePath: string, body?: string): RawLinkRef[] {
+		this.rawRefBodies.push([notePath, body]);
 		return this.refs[notePath] ?? [];
 	}
 
