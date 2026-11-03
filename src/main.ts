@@ -20,6 +20,8 @@ export default class UctNotebookSyncPlugin extends Plugin {
 	private transport = new ObsidianHttpTransport();
 	private syncManager!: SyncManager;
 	private settingTab!: UctNotebookSyncSettingTab;
+	/** After this long, a running sync shows a "syncing" notice. */
+	private syncingNoticeDelayMs = 3000;
 	private syncing = false;
 
 	async onload(): Promise<void> {
@@ -124,7 +126,17 @@ export default class UctNotebookSyncPlugin extends Plugin {
 				new Notice(error);
 				return refusedSummary(error);
 			}
-			const summary = await this.syncManager.runSync();
+			// A run that takes a while says so (final review M1): a large vault can spend a
+			// minute on images and files before the summary notice appears.
+			const syncingNotice = setTimeout(() => {
+				new Notice('UCT Notebook Sync: syncing…');
+			}, this.syncingNoticeDelayMs);
+			let summary: SyncSummary;
+			try {
+				summary = await this.syncManager.runSync();
+			} finally {
+				clearTimeout(syncingNotice);
+			}
 			new Notice(summarize(summary));
 			if (summary.ok && summary.attachmentsSupported && this.data.syncAttachments
 				&& !this.data.attachmentsNoticeShown) {

@@ -172,6 +172,23 @@ describe('plugin wiring of the Server URL guard', () => {
 		expect((plugin as any).saveCalls.length).toBe(saves + 1);
 	});
 
+	it('a long sync shows a "syncing" notice; a quick one does not (final review M1)', async () => {
+		const { plugin, transport } = await makePlugin('https://uctintelligence.com');
+		(plugin as any).syncingNoticeDelayMs = 20;
+		await plugin.runManualSync(); // quick
+		expect(notices.filter((n) => n.includes('syncing'))).toEqual([]);
+
+		let release!: () => void;
+		const gate = new Promise<void>((r) => { release = r; });
+		const realIngest = transport.ingest.bind(transport);
+		transport.ingest = async (p: IngestParams) => { await gate; return realIngest(p); };
+		const running = plugin.runManualSync();
+		await new Promise((r) => setTimeout(r, 60));
+		expect(notices.filter((n) => n.includes('syncing'))).toHaveLength(1);
+		release();
+		await running;
+	});
+
 	it('the lock is released after an invalid-URL refusal', async () => {
 		const { plugin } = await makePlugin('ftp://uctintelligence.com');
 		await plugin.runManualSync();
